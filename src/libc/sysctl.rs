@@ -70,4 +70,4 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(sysctl(_, _, _, _, _, _)),
     export_c_func!(sysctlbyname(_, _, _, _, _)),
 ];
-pub const FUNCTIONS: FunctionExports = &[export_c_func!(sysctl(_, _, _, _, _, _))];
+pub const FUNCTIONS: FunctionExports = &[export_c_func!(sysctl(_, _, _, _, _, _))]; 
