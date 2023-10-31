@@ -1,20 +1,53 @@
 # Contributing to touchHLE
 
-## General
-
-Please be kind and respectful to others.
-
-It's especially important to value and respect others' time and energy: don't demand or expect anything to happen on any particular timescale, or even for anyone to do anything at all. We're all volunteers here, doing things for the love of it, and if you force us to spend a lot of time on _you_, it's going to slowly chip away at our passion and enthusiasm.
-
-**⚠️ Do not link to pirated content. “Abandonware” is also pirated content.**<br>
-**⚠️ Do not link to illegal copies of applications that were released for free. These are also considered pirated content.**<br>
-**⚠️ Do not ask about how to obtain pirated content.**<br>
-**⚠️ Do not talk about using pirated content.**<br>
-**⚠️ You _will_ be banned if you ignore this warning.**<br>
+Please also read the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## Issues
 
 Please bear in mind that there are infinitely many apps that do not work in touchHLE right now, so please don't open issues about apps that aren't in [the supported list](APP_SUPPORT.md), unless you've got it partially working (e.g. loaded up to the menu but the main game doesn't work). The fact that an app's splash screen (Default.png) shows up doesn't mean it's partially working.
+
+## Source control and review
+
+### Setting up the repo
+
+touchHLE uses git source control. You can get the source code from GitHub like this:
+
+```
+$ git clone https://github.com/hikari-no-yume/touchHLE.git
+$ cd touchHLE
+```
+
+touchHLE uses Gerrit for code review. [The touchHLE repo on GerritHub](https://review.gerrithub.io/q/project:hikari-no-yume/touchHLE+status:open) is where you can submit patches.
+
+Log into GerritHub with your GitHub account. (If that fails with some server error, try again in a few hours; there are some reliability issues.) If it's your first time using GerritHub, you can then [go to “GitHub” &gt; “Profile” in the Gerrit UI](https://review.gerrithub.io/plugins/github-plugin/static/account.html) to set up your profile and import your SSH keys. It is recommended to provide a “Full name”, which is just a display name and does not have to be your legal name.
+
+You can then add GerritHub as a “remote” (replace `your-github-username-here` with your username):
+
+```
+$ git remote add gerrit "ssh://your-github-username-here@review.gerrithub.io:29418/hikari-no-yume/touchHLE"
+```
+
+Gerrit requires your commit messages to have a `Change-Id:` line in them. Gerrit provides a git hook that adds this line to your commit messages automatically. You can install it like this (Windows users may need to use git bash for this):
+
+```
+$ (f=`git rev-parse --git-dir`/hooks/commit-msg ; mkdir -p $(dirname $f) ; curl -Lo $f https://review.gerrithub.io/tools/hooks/commit-msg ; chmod +x $f)
+```
+
+### Submitting changes
+
+Make a local branch based on `trunk` with your changes. Try to avoid bundling unrelated changes in one commit. If you make a mistake in a commit that hasn't been merged yet, please fix it by modifying the original commit (e.g. using `git commit --amend --reset-author`), rather than by adding a separate commit.
+
+Once you're happy with your changes, you can push them for review on Gerrit with:
+
+```
+$ git push gerrit HEAD:refs/for/trunk
+```
+
+Then go to GerritHub, make sure you didn't push anything you didn't intend to, and add `hikari_no_yume` as a reviewer.
+
+If you're submitting a large number of changes with a common theme, e.g. improving compatibility with some app, it is recommended to _also_ create a GitHub pull request. This improves visibility and ensures your changes are tested by the GitHub CI. You can then tag the Gerrit reviews with a “topic” named like `touchHLE/pull/xxx` where xxx is the pull request number. You can bulk-tag things using the checkboxes on the GerritHub homepage.
+
+Please also see the following guidelines for what to do with code changes.
 
 ## Code contributions
 
@@ -22,9 +55,13 @@ Please bear in mind that there are infinitely many apps that do not work in touc
 
 Please run `cargo fmt` and `cargo clippy` on your changes before committing. For the handful of C and C++ files, please use `clang-format -i` to format them.
 
+You should also run `cargo test`. [Building the integration tests requires downloading LLVM](tests/BUILDING.md), so it's understandable if you want to skip them (`cargo test -- --skip run_test_app`) and let the GitHub Actions CI catch any issues when you submit your pull request. Alternatively, you can download a pre-built version of the integration tests app (TestApp) from GitHub Actions CI and run it in touchHLE.
+
 If you're going to open a pull request with non-trivial changes, please talk to us first so we can figure out if we're likely to accept them. It would be a shame if your effort had to be wasted.
 
 ### Copyright and reverse engineering
+
+(Please also read the copyright rules in the code of conduct.)
 
 ⚠️ Be **very** careful about copyright. To put it simply: **don't contribute if you've seen code you shouldn't have seen, don't copy code that isn't yours to copy, and especially don't _secretly_ copy and pretend you didn't**. Any infringement of Apple or other copyrights could threaten the foundations of the project, and the livelihoods of current contributors. **If in doubt, don't do it**, but in particular:
 

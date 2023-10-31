@@ -11,7 +11,8 @@ use super::ns_array;
 use super::{
     NSComparisonResult, NSOrderedAscending, NSOrderedDescending, NSOrderedSame, NSUInteger,
 };
-use crate::frameworks::core_graphics::{CGRect, CGSize};
+use crate::abi::VaList;
+use crate::frameworks::core_graphics::{CGFloat, CGPoint, CGRect, CGSize};
 use crate::frameworks::uikit::ui_font::{
     self, UILineBreakMode, UILineBreakModeWordWrap, UITextAlignment, UITextAlignmentLeft,
 };
@@ -25,6 +26,7 @@ use crate::objc::{
 use crate::Environment;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::iter::Peekable;
 use std::string::FromUtf16Error;
 
 pub type NSStringEncoding = NSUInteger;
@@ -34,6 +36,10 @@ pub const NSUnicodeStringEncoding: NSUInteger = 10;
 pub const NSUTF16StringEncoding: NSUInteger = NSUnicodeStringEncoding;
 pub const NSUTF16BigEndianStringEncoding: NSUInteger = 0x90000100;
 pub const NSUTF16LittleEndianStringEncoding: NSUInteger = 0x94000100;
+
+pub type NSStringCompareOptions = NSUInteger;
+pub const NSLiteralSearch: NSUInteger = 2;
+pub const NSNumericSearch: NSUInteger = 64;
 
 /// Encodings that C strings (null-terminated byte strings) can use.
 const C_STRING_FRIENDLY_ENCODINGS: &[NSStringEncoding] =
@@ -199,6 +205,36 @@ impl<'a> CodeUnitIterator<'a> {
     }
 }
 
+/// Helper for formatting methods. They can't call eachother currently due to
+/// full vararg passthrough being missing.
+pub fn with_format(env: &mut Environment, format: id, args: VaList) -> String {
+    let format_string = to_rust_string(env, format);
+
+    log_dbg!("Formatting {:?} ({:?})", format, format_string);
+
+    let res = crate::libc::stdio::printf::printf_inner::<true, _>(
+        env,
+        |_, idx| {
+            if idx as usize == format_string.len() {
+                b'\0'
+            } else {
+                format_string.as_bytes()[idx as usize]
+            }
+        },
+        args,
+    );
+    // TODO: what if it's not valid UTF-8?
+    String::from_utf8(res).unwrap()
+}
+
+fn from_rust_ordering(ordering: std::cmp::Ordering) -> NSComparisonResult {
+    match ordering {
+        std::cmp::Ordering::Less => NSOrderedAscending,
+        std::cmp::Ordering::Equal => NSOrderedSame,
+        std::cmp::Ordering::Greater => NSOrderedDescending,
+    }
+}
+
 pub const CLASSES: ClassExports = objc_classes! {
 
 (env, this, _cmd);
@@ -215,6 +251,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     // to have the normal behaviour. Unimplemented: call superclass alloc then.
     assert!(this == env.objc.get_known_class("NSString", &mut env.mem));
     msg_class![env; _touchHLE_NSString allocWithZone:zone]
+}
+
++ (id)stringWithString:(id)string { // NSString*
+    let new: id = msg![env; this alloc];
+    let new: id = msg![env; new initWithString:string];
+    autorelease(env, new)
 }
 
 + (id)stringWithUTF8String:(ConstPtr<u8>)utf8_string {
@@ -248,24 +290,8 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 + (id)stringWithFormat:(id)format, // NSString*
                        ...args {
-    // TODO: avoid copy
-    let format_string = to_rust_string(env, format);
-
-    log_dbg!("[NSString stringWithFormat:{:?} ({:?}), ...]", format, format_string);
-
-    let res = crate::libc::stdio::printf::printf_inner::<true, _>(
-        env,
-        |_, idx| {
-            if idx as usize == format_string.len() {
-                b'\0'
-            } else {
-                format_string.as_bytes()[idx as usize]
-            }
-        },
-        args.start(),
-    );
-    // TODO: what if it's not valid UTF-8?
-    let res = from_rust_string(env, String::from_utf8(res).unwrap());
+    let res = with_format(env, format, args.start());
+    let res = from_rust_string(env, res);
     autorelease(env, res)
 }
 
@@ -332,14 +358,57 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (NSComparisonResult)compare:(id)other { // NSString*
+    msg![env; this compare:other options:NSLiteralSearch]
+}
+
+- (NSComparisonResult)compare:(id)other options:(NSStringCompareOptions)mask { // NSString*
+    fn ascii_number(iter: &mut Peekable<CodeUnitIterator>, leftmost_digit: char) -> u32 {
+        let mut num = leftmost_digit.to_digit(10).unwrap();
+        while let Some(a_digit_char) = iter.next_if(
+            |&x| char::from_u32(x as u32).map_or(false, |y| y.is_ascii_digit())
+        ) {
+            num = num * 10 + char::from_u32(a_digit_char as u32).unwrap().to_digit(10).unwrap();
+        }
+        num
+    }
+
     // TODO: support foreign subclasses (perhaps via a helper function that
     // copies the string first)
-    let a_iter = env.objc.borrow::<StringHostObject>(this).iter_code_units();
-    let b_iter = env.objc.borrow::<StringHostObject>(other).iter_code_units();
-    match a_iter.cmp(b_iter) {
-        std::cmp::Ordering::Less => NSOrderedAscending,
-        std::cmp::Ordering::Equal => NSOrderedSame,
-        std::cmp::Ordering::Greater => NSOrderedDescending,
+    let mut a_iter = env.objc.borrow::<StringHostObject>(this).iter_code_units().peekable();
+    let mut b_iter = env.objc.borrow::<StringHostObject>(other).iter_code_units().peekable();
+    // TODO: OR'ing of compare options
+    match mask {
+        NSLiteralSearch => {
+            from_rust_ordering(a_iter.cmp(b_iter))
+        },
+        NSNumericSearch => {
+            loop {
+                let a_next = a_iter.next();
+                let b_next = b_iter.next();
+                let (Some(a_unit), Some(b_unit)) = (a_next, b_next) else {
+                    return from_rust_ordering(a_next.cmp(&b_next));
+                };
+                let (Some(a_c), Some(b_c)) = (char::from_u32(a_unit as u32), char::from_u32(b_unit as u32)) else {
+                    panic!("Invalid chars in the strings!");
+                };
+
+                if a_c.is_ascii_digit() && b_c.is_ascii_digit() {
+                    let a_int = ascii_number(&mut a_iter, a_c);
+                    let b_int = ascii_number(&mut b_iter, b_c);
+
+                    let numeric_order = a_int.cmp(&b_int);
+                    if numeric_order != std::cmp::Ordering::Equal {
+                        return from_rust_ordering(numeric_order);
+                    }
+                } else {
+                    let char_order = a_c.cmp(&b_c);
+                    if char_order != std::cmp::Ordering::Equal {
+                        return from_rust_ordering(char_order);
+                    }
+                }
+            }
+        },
+        _ => unimplemented!("Other masks"),
     }
 }
 
@@ -436,12 +505,12 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (ConstPtr<u8>)UTF8String {
     // TODO: avoid copying
     let string = to_rust_string(env, this);
-    let c_string = env.mem.alloc_and_write_cstr(string.as_bytes()).cast_const();
+    let c_string = env.mem.alloc_and_write_cstr(string.as_bytes());
     let length: NSUInteger = (string.len() + 1).try_into().unwrap();
     // NSData will handle releasing the string (it is autoreleased)
-    let _: id = msg_class![env; NSData dataWithBytesNoCopy:c_string
+    let _: id = msg_class![env; NSData dataWithBytesNoCopy:(c_string.cast_void())
                                                     length:length];
-    c_string
+    c_string.cast_const()
 }
 
 - (id)stringByTrimmingCharactersInSet:(id)set { // NSCharacterSet*
@@ -609,6 +678,26 @@ pub const CLASSES: ClassExports = objc_classes! {
     autorelease(env, new_string)
 }
 
+- (id)stringByStandardizingPath {
+    let path = to_rust_string(env, this); // TODO: avoid copying
+    // TODO: Expanding an initial tilde expression using stringByExpandingTildeInPath
+    assert!(!path.contains('~'));
+    // TODO: Removing an initial component of "/private/var/automount", "/var/automount”, or "/private” from the path
+    assert!(!path.starts_with("/private"));
+    assert!(!path.starts_with("/var/automount"));
+    // TODO: Reducing empty components and references to the current directory
+    assert!(!path.contains("//"));
+    assert!(!path.contains("/./"));
+    // Removing a trailing slash from the last component.
+    let path = path_algorithms::trim_trailing_slashes(&path);
+    // TODO: For absolute paths only, resolving references to the parent directory
+    if path.starts_with('/') {
+        assert!(!path.contains(".."));
+    }
+    let new_string = from_rust_string(env, String::from(path));
+    autorelease(env, new_string)
+}
+
 // These come from a category in UIKit (UIStringDrawing).
 // TODO: Implement categories so we can completely move the code to UIFont.
 // TODO: More `sizeWithFont:` variants
@@ -629,6 +718,22 @@ pub const CLASSES: ClassExports = objc_classes! {
     // TODO: avoid copy
     let text = to_rust_string(env, this);
     ui_font::size_with_font(env, font, &text, Some((size, line_break_mode)))
+}
+
+- (CGSize)drawAtPoint:(CGPoint)point
+             withFont:(id)font { // UIFont*
+    // TODO: avoid copy
+    let text = to_rust_string(env, this);
+    ui_font::draw_at_point(env, font, &text, point, None)
+}
+
+- (CGSize)drawAtPoint:(CGPoint)point
+             forWidth:(CGFloat)width
+             withFont:(id)font // UIFont*
+        lineBreakMode:(UILineBreakMode)line_break_mode {
+    // TODO: avoid copy
+    let text = to_rust_string(env, this);
+    ui_font::draw_at_point(env, font, &text, point, Some((width, line_break_mode)))
 }
 
 - (CGSize)drawInRect:(CGRect)rect
@@ -668,6 +773,20 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 // TODO: more init methods
 
+- (id)initWithFormat:(id)format, // NSString*
+                     ...args {
+    let res = with_format(env, format, args.start());
+    *env.objc.borrow_mut(this) = StringHostObject::Utf8(res.into());
+    this
+}
+
+- (id)initWithFormat:(id)format // NSString*
+           arguments:(VaList)args {
+    let res = with_format(env, format, args);
+    *env.objc.borrow_mut(this) = StringHostObject::Utf8(res.into());
+    this
+}
+
 - (id)initWithBytes:(ConstPtr<u8>)bytes
              length:(NSUInteger)len
            encoding:(NSStringEncoding)encoding {
@@ -677,6 +796,14 @@ pub const CLASSES: ClassExports = objc_classes! {
 
     *env.objc.borrow_mut(this) = host_object;
 
+    this
+}
+
+- (id)initWithString:(id)string { // NSString *
+    // TODO: optimize for more common cases (or maybe just call copy?)
+    let mut code_units = Vec::new();
+    for_each_code_unit(env, string, |_, c| code_units.push(c));
+    *env.objc.borrow_mut(this) = StringHostObject::Utf16(code_units);
     this
 }
 
@@ -753,7 +880,9 @@ pub const CLASSES: ClassExports = objc_classes! {
 /// Sets up host objects and updates `isa` fields
 /// (`___CFConstantStringClassReference` is ignored by our dyld).
 pub fn register_constant_strings(bin: &MachO, mem: &mut Mem, objc: &mut ObjC) {
-    let Some(cfstrings) = bin.get_section("__cfstring") else { return; };
+    let Some(cfstrings) = bin.get_section("__cfstring") else {
+        return;
+    };
 
     assert!(cfstrings.size % guest_size_of::<cfstringStruct>() == 0);
     let base: ConstPtr<cfstringStruct> = Ptr::from_bits(cfstrings.addr);

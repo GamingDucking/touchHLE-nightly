@@ -8,10 +8,13 @@
 //! Resources:
 //! - [Apple's documentation of `class_addMethod`](https://developer.apple.com/documentation/objectivec/1418901-class_addmethod?language=objc)
 
-use super::{id, nil, Class, ClassHostObject, ObjC, SEL};
+use super::{
+    id, nil, objc_super, Class, ClassHostObject, MsgSendSignature, MsgSendSuperSignature, ObjC, SEL,
+};
 use crate::abi::{CallFromGuest, DotDotDot, GuestArg, GuestFunction, GuestRet};
 use crate::mem::{guest_size_of, ConstPtr, GuestUSize, Mem, Ptr, SafeRead};
 use crate::Environment;
+use std::any::TypeId;
 
 /// Type for any function implementating a method.
 ///
@@ -27,90 +30,58 @@ pub enum IMP {
 }
 
 /// Type for any host function implementing a method (see also [IMP]).
-pub trait HostIMP: CallFromGuest {}
+pub trait HostIMP: CallFromGuest {
+    /// See [MsgSendSignature::type_info].
+    fn type_info(&self) -> (TypeId, &'static str);
+}
 
-impl<R> HostIMP for fn(&mut Environment, id, SEL) -> R where R: GuestRet {}
-impl<R, P1> HostIMP for fn(&mut Environment, id, SEL, P1) -> R
-where
-    R: GuestRet,
-    P1: GuestArg,
-{
+macro_rules! impl_HostIMP {
+    ( $($P:ident),* ) => {
+        impl<R, $($P,)*> HostIMP for fn(&mut Environment, id, SEL, $($P,)*) -> R
+        where
+            R: GuestRet + 'static,
+            $($P: GuestArg + 'static,)*
+        {
+            fn type_info(&self) -> (TypeId, &'static str) {
+                <(R, (id, SEL, $($P,)*)) as MsgSendSignature>::type_info()
+            }
+        }
+        impl<R, $($P,)*> HostIMP for fn(&mut Environment, id, SEL, $($P,)* DotDotDot) -> R
+        where
+            R: GuestRet + 'static,
+            $($P: GuestArg + 'static,)*
+        {
+            fn type_info(&self) -> (TypeId, &'static str) {
+                todo!("host-to-host message calls with var-args"); // TODO
+            }
+        }
+
+        // Currently there is a one-to-one mapping between valid host IMP
+        // parameters and valid host message send arguments, so the traits for
+        // the latter are also implemented here for convenience.
+
+        impl<R, $($P,)*> MsgSendSignature for (R, (id, SEL, $($P,)*))
+        where
+            R: GuestRet + 'static,
+            $($P: GuestArg + 'static,)*
+        {
+        }
+        impl<R, $($P,)*> MsgSendSuperSignature for (R, (ConstPtr<objc_super>, SEL, $($P,)*))
+        where
+            R: GuestRet + 'static,
+            $($P: GuestArg + 'static,)*
+        {
+            type WithoutSuper = (R, (id, SEL, $($P,)*));
+        }
+    }
 }
-impl<R, P1> HostIMP for fn(&mut Environment, id, SEL, P1, DotDotDot) -> R
-where
-    R: GuestRet,
-    P1: GuestArg,
-{
-}
-impl<R, P1, P2> HostIMP for fn(&mut Environment, id, SEL, P1, P2) -> R
-where
-    R: GuestRet,
-    P1: GuestArg,
-    P2: GuestArg,
-{
-}
-impl<R, P1, P2> HostIMP for fn(&mut Environment, id, SEL, P1, P2, DotDotDot) -> R
-where
-    R: GuestRet,
-    P1: GuestArg,
-    P2: GuestArg,
-{
-}
-impl<R, P1, P2, P3> HostIMP for fn(&mut Environment, id, SEL, P1, P2, P3) -> R
-where
-    R: GuestRet,
-    P1: GuestArg,
-    P2: GuestArg,
-    P3: GuestArg,
-{
-}
-impl<R, P1, P2, P3> HostIMP for fn(&mut Environment, id, SEL, P1, P2, P3, DotDotDot) -> R
-where
-    R: GuestRet,
-    P1: GuestArg,
-    P2: GuestArg,
-    P3: GuestArg,
-{
-}
-impl<R, P1, P2, P3, P4> HostIMP for fn(&mut Environment, id, SEL, P1, P2, P3, P4) -> R
-where
-    R: GuestRet,
-    P1: GuestArg,
-    P2: GuestArg,
-    P3: GuestArg,
-    P4: GuestArg,
-{
-}
-impl<R, P1, P2, P3, P4> HostIMP for fn(&mut Environment, id, SEL, P1, P2, P3, P4, DotDotDot) -> R
-where
-    R: GuestRet,
-    P1: GuestArg,
-    P2: GuestArg,
-    P3: GuestArg,
-    P4: GuestArg,
-{
-}
-impl<R, P1, P2, P3, P4, P5> HostIMP for fn(&mut Environment, id, SEL, P1, P2, P3, P4, P5) -> R
-where
-    R: GuestRet,
-    P1: GuestArg,
-    P2: GuestArg,
-    P3: GuestArg,
-    P4: GuestArg,
-    P5: GuestArg,
-{
-}
-impl<R, P1, P2, P3, P4, P5> HostIMP
-    for fn(&mut Environment, id, SEL, P1, P2, P3, P4, P5, DotDotDot) -> R
-where
-    R: GuestRet,
-    P1: GuestArg,
-    P2: GuestArg,
-    P3: GuestArg,
-    P4: GuestArg,
-    P5: GuestArg,
-{
-}
+
+impl_HostIMP!();
+impl_HostIMP!(P1);
+impl_HostIMP!(P1, P2);
+impl_HostIMP!(P1, P2, P3);
+impl_HostIMP!(P1, P2, P3, P4);
+impl_HostIMP!(P1, P2, P3, P4, P5);
 
 /// Type for a guest function implementing a method. See [GuestFunction].
 pub type GuestIMP = GuestFunction;
@@ -212,6 +183,38 @@ impl ObjC {
             self.object_has_method(mem, obj, sel)
         } else {
             false
+        }
+    }
+
+    /// Checks if a class overrides a method provided by its superclass.
+    ///
+    /// This looks through a superclass chain looking for the selector, stopping
+    /// when the superclass is hit (and panicking if it never is). It does not
+    /// check whether the selector is actually a method on the superclass.
+    pub fn class_overrides_method_of_superclass(
+        &self,
+        class: Class,
+        sel: SEL,
+        superclass: Class,
+    ) -> bool {
+        let mut class = class;
+        loop {
+            if class == superclass {
+                return false;
+            }
+
+            let &ClassHostObject {
+                superclass,
+                ref methods,
+                ..
+            } = self.borrow(class);
+            if methods.contains_key(&sel) {
+                return true;
+            } else if superclass == nil {
+                panic!();
+            } else {
+                class = superclass;
+            }
         }
     }
 }

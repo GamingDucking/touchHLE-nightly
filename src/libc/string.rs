@@ -8,6 +8,7 @@
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::mem::{ConstPtr, ConstVoidPtr, GuestUSize, MutPtr, MutVoidPtr, Ptr};
 use crate::Environment;
+use std::cmp::Ordering;
 
 use super::generic_char::GenericChar;
 
@@ -94,6 +95,15 @@ pub(super) fn strlen(env: &mut Environment, s: ConstPtr<u8>) -> GuestUSize {
 fn strcpy(env: &mut Environment, dest: MutPtr<u8>, src: ConstPtr<u8>) -> MutPtr<u8> {
     GenericChar::<u8>::strcpy(env, dest, src)
 }
+fn __strcpy_chk(
+    env: &mut Environment,
+    dest: MutPtr<u8>,
+    src: ConstPtr<u8>,
+    _size: GuestUSize,
+) -> MutPtr<u8> {
+    log!("Warning: ignore a buffer overflow check in __strcpy_chk");
+    strcpy(env, dest, src)
+}
 fn strcat(env: &mut Environment, dest: MutPtr<u8>, src: ConstPtr<u8>) -> MutPtr<u8> {
     GenericChar::<u8>::strcat(env, dest, src)
 }
@@ -105,6 +115,36 @@ fn strncpy(
 ) -> MutPtr<u8> {
     GenericChar::<u8>::strncpy(env, dest, src, size)
 }
+fn strsep(env: &mut Environment, stringp: MutPtr<MutPtr<u8>>, delim: ConstPtr<u8>) -> MutPtr<u8> {
+    let orig = env.mem.read(stringp);
+    if orig.is_null() {
+        return Ptr::null();
+    }
+    let tmp = orig;
+    let mut i = 0;
+    loop {
+        let c = env.mem.read(tmp + i);
+        if c == b'\0' {
+            env.mem.write(stringp, Ptr::null());
+            break;
+        }
+        let mut j = 0;
+        loop {
+            let cc = env.mem.read(delim + j);
+            if c == cc {
+                env.mem.write(tmp + i, b'\0');
+                env.mem.write(stringp, tmp + i + 1);
+                return orig;
+            }
+            if cc == b'\0' {
+                break;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    orig
+}
 pub(super) fn strdup(env: &mut Environment, src: ConstPtr<u8>) -> MutPtr<u8> {
     GenericChar::<u8>::strdup(env, src)
 }
@@ -113,6 +153,55 @@ fn strcmp(env: &mut Environment, a: ConstPtr<u8>, b: ConstPtr<u8>) -> i32 {
 }
 fn strncmp(env: &mut Environment, a: ConstPtr<u8>, b: ConstPtr<u8>, n: GuestUSize) -> i32 {
     GenericChar::<u8>::strncmp(env, a, b, n)
+}
+fn strcasecmp(env: &mut Environment, a: ConstPtr<u8>, b: ConstPtr<u8>) -> i32 {
+    // TODO: generalize to wide chars
+    let mut offset = 0;
+    loop {
+        let char_a = env.mem.read(a + offset).to_ascii_lowercase();
+        let char_b = env.mem.read(b + offset).to_ascii_lowercase();
+        offset += 1;
+
+        match char_a.cmp(&char_b) {
+            Ordering::Less => return -1,
+            Ordering::Greater => return 1,
+            Ordering::Equal => {
+                if char_a == u8::default() {
+                    return 0;
+                } else {
+                    continue;
+                }
+            }
+        }
+    }
+}
+fn strncasecmp(env: &mut Environment, a: ConstPtr<u8>, b: ConstPtr<u8>, n: GuestUSize) -> i32 {
+    // TODO: generalize to wide chars
+    if n == 0 {
+        return 0;
+    }
+
+    let mut offset = 0;
+    loop {
+        let char_a = env.mem.read(a + offset).to_ascii_lowercase();
+        let char_b = env.mem.read(b + offset).to_ascii_lowercase();
+        offset += 1;
+
+        match char_a.cmp(&char_b) {
+            Ordering::Less => return -1,
+            Ordering::Greater => return 1,
+            Ordering::Equal => {
+                if offset == n || char_a == u8::default() {
+                    return 0;
+                } else {
+                    continue;
+                }
+            }
+        }
+    }
+}
+fn strncat(env: &mut Environment, s1: MutPtr<u8>, s2: ConstPtr<u8>, n: GuestUSize) -> MutPtr<u8> {
+    GenericChar::<u8>::strncat(env, s1, s2, n)
 }
 fn strstr(env: &mut Environment, string: ConstPtr<u8>, substring: ConstPtr<u8>) -> ConstPtr<u8> {
     GenericChar::<u8>::strstr(env, string, substring)
@@ -134,11 +223,16 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(memcmp(_, _, _)),
     export_c_func!(strlen(_)),
     export_c_func!(strcpy(_, _)),
+    export_c_func!(__strcpy_chk(_, _, _)),
     export_c_func!(strcat(_, _)),
     export_c_func!(strncpy(_, _, _)),
+    export_c_func!(strsep(_, _)),
     export_c_func!(strdup(_)),
     export_c_func!(strcmp(_, _)),
     export_c_func!(strncmp(_, _, _)),
+    export_c_func!(strcasecmp(_, _)),
+    export_c_func!(strncasecmp(_, _, _)),
+    export_c_func!(strncat(_, _, _)),
     export_c_func!(strstr(_, _)),
     export_c_func!(strchr(_, _)),
     export_c_func!(strrchr(_, _)),

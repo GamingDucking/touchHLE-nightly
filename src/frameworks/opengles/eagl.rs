@@ -13,12 +13,13 @@ use crate::frameworks::foundation::ns_string::get_static_str;
 use crate::frameworks::foundation::NSUInteger;
 use crate::gles::gles11_raw as gles11; // constants only
 use crate::gles::gles11_raw::types::*;
-use crate::gles::present::present_frame;
+use crate::gles::present::{present_frame, FpsCounter};
 use crate::gles::{create_gles1_ctx, gles1_on_gl2, GLES};
 use crate::objc::{id, msg, nil, objc_classes, release, retain, ClassExports, HostObject};
+use crate::options::Options;
 use crate::window::Window;
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // These are used by the EAGLDrawable protocol implemented by CAEAGLayer.
 // Since these have the ABI of constant symbols rather than literal constants,
@@ -59,6 +60,8 @@ pub(super) struct EAGLContextHostObject {
     /// Mapping of OpenGL ES renderbuffer names to `EAGLDrawable` instances
     /// (always `CAEAGLLayer*`). Retains the instance so it won't dangle.
     renderbuffer_drawable_bindings: HashMap<GLuint, id>,
+    fps_counter: Option<FpsCounter>,
+    next_frame_due: Option<Instant>,
 }
 impl HostObject for EAGLContextHostObject {}
 
@@ -72,6 +75,8 @@ pub const CLASSES: ClassExports = objc_classes! {
     let host_object = Box::new(EAGLContextHostObject {
         gles_ctx: None,
         renderbuffer_drawable_bindings: HashMap::new(),
+        fps_counter: None,
+        next_frame_due: None,
     });
     env.objc.alloc_object(this, host_object, &mut env.mem)
 }
@@ -83,7 +88,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     retain(env, context);
 
     // Clear flag value, we're changing context anyway.
-    let _ = env.window.is_app_gl_ctx_no_longer_current();
+    let _ = env.window_mut().is_app_gl_ctx_no_longer_current();
 
     let current_ctx = env.framework_state.opengles.current_ctx_for_thread(env.current_thread);
 
@@ -97,7 +102,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 
     if context != nil {
         let host_obj = env.objc.borrow_mut::<EAGLContextHostObject>(context);
-        host_obj.gles_ctx.as_mut().unwrap().make_current(&env.window);
+        host_obj.gles_ctx.as_mut().unwrap().make_current(env.window.as_ref().unwrap());
         *current_ctx = Some(context);
         env.framework_state.opengles.current_ctx_thread = Some(env.current_thread);
     }
@@ -108,14 +113,15 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (id)initWithAPI:(EAGLRenderingAPI)api {
     assert!(api == kEAGLRenderingAPIOpenGLES1);
 
-    let gles1_ctx = create_gles1_ctx(&mut env.window, &env.options);
+    let window = env.window.as_mut().expect("OpenGL ES is not supported in headless mode");
+    let gles1_ctx = create_gles1_ctx(window, &env.options);
 
     // Make the context current so we can get driver info from it.
     // initWithAPI: is not supposed to make the new context current (the app
     // must call setCurrentContext: for that), so we need to hide this from the
     // app. Setting current_ctx_thread to None should cause sync_context to
     // switch back to the right context if the app makes an OpenGL ES call.
-    gles1_ctx.make_current(&env.window);
+    gles1_ctx.make_current(window);
     env.framework_state.opengles.current_ctx_thread = None;
     log!("Driver info: {}", unsafe { gles1_ctx.driver_description() });
 
@@ -159,12 +165,14 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
     let internalformat = gles11::RGBA8_OES;
 
+    let window = env.window.as_mut().expect("OpenGL ES is not supported in headless mode");
+
     // FIXME: get width and height from the layer!
-    let (width, height) = env.window.size_unrotated_scalehacked();
+    let (width, height) = window.size_unrotated_scalehacked();
 
     // Unclear from documentation if this method requires an appropriate context
     // to already be active, but that seems to be the case in practice?
-    let gles = super::sync_context(&mut env.framework_state.opengles, &mut env.objc, &mut env.window, env.current_thread);
+    let gles = super::sync_context(&mut env.framework_state.opengles, &mut env.objc, window, env.current_thread);
     let renderbuffer: GLuint = unsafe {
         gles.RenderbufferStorageOES(target, internalformat, width.try_into().unwrap(), height.try_into().unwrap());
         let mut renderbuffer = 0;
@@ -187,11 +195,25 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (bool)presentRenderbuffer:(NSUInteger)target {
     assert!(target == gles11::RENDERBUFFER_OES);
 
+    // The presented frame should be displayed ASAP, but the next one must be
+    // delayed, so this needs to be checked before returning.
+    let sleep_for = limit_framerate(&mut env.objc.borrow_mut::<EAGLContextHostObject>(this).next_frame_due, &env.options);
+
+    if env.options.print_fps {
+        env
+            .objc
+            .borrow_mut::<EAGLContextHostObject>(this)
+            .fps_counter
+            .get_or_insert_with(FpsCounter::start)
+            .count_frame(format_args!("EAGLContext {:?}", this));
+    }
+
     let fullscreen_layer = find_fullscreen_eagl_layer(env);
 
     // Unclear from documentation if this method requires the context to be
     // current, but it would be weird if it didn't?
-    let gles = super::sync_context(&mut env.framework_state.opengles, &mut env.objc, &mut env.window, env.current_thread);
+    let window = env.window.as_mut().expect("OpenGL ES is not supported in headless mode");
+    let gles = super::sync_context(&mut env.framework_state.opengles, &mut env.objc, window, env.current_thread);
 
     let renderbuffer: GLuint = unsafe {
         let mut renderbuffer = 0;
@@ -215,9 +237,9 @@ pub const CLASSES: ClassExports = objc_classes! {
             renderbuffer,
         );
         // re-borrow
-        let gles = super::sync_context(&mut env.framework_state.opengles, &mut env.objc, &mut env.window, env.current_thread);
+        let gles = super::sync_context(&mut env.framework_state.opengles, &mut env.objc, env.window.as_mut().unwrap(), env.current_thread);
         unsafe {
-            present_renderbuffer(gles, &mut env.window);
+            present_renderbuffer(gles, env.window.as_mut().unwrap());
         }
     } else {
         if fullscreen_layer != nil {
@@ -231,6 +253,9 @@ pub const CLASSES: ClassExports = objc_classes! {
                 fullscreen_layer,
                 renderbuffer,
             );
+            if let Some(sleep_for) = sleep_for {
+                env.sleep(sleep_for, /* tail_call: */ false);
+            }
             return true;
         }
 
@@ -246,11 +271,15 @@ pub const CLASSES: ClassExports = objc_classes! {
         );
         let pixels_vec = get_pixels_vec_for_presenting(env, drawable);
         // re-borrow
-        let gles = super::sync_context(&mut env.framework_state.opengles, &mut env.objc, &mut env.window, env.current_thread);
+        let gles = super::sync_context(&mut env.framework_state.opengles, &mut env.objc, env.window.as_mut().unwrap(), env.current_thread);
         let (pixels_vec, width, height) = unsafe {
             read_renderbuffer(gles, pixels_vec)
         };
         present_pixels(env, drawable, pixels_vec, width, height);
+    }
+
+    if let Some(sleep_for) = sleep_for {
+        env.sleep(sleep_for, /* tail_call: */ false);
     }
 
     true
@@ -259,6 +288,64 @@ pub const CLASSES: ClassExports = objc_classes! {
 @end
 
 };
+
+/// Implement framerate limiting.
+///
+/// The real iPhone OS seems to force 60Hz v-sync in `presentRenderbuffer:`.
+/// touchHLE does not force v-sync, and its users might not have 60Hz monitors
+/// in any case, so to avoid excessive FPS or games running too fast, we need
+/// to simulate it.
+///
+/// V-sync is essentially a limiter with no "slop", or allowance for frames
+/// arriving late: if the frame misses a 60Hz interval, it must wait until the
+/// next one. This is quite harsh: if frames consistently arrive very slightly
+/// late, the framerate is halved!
+///
+/// Most games already use NSTimer, which is itself a v-sync-like limiter.
+/// For the remainder, let's do something a bit kinder, for the benefit of users
+/// with slow systems or which are using high scale hack settings: allow at most
+/// an interval's worth of accumulated slop. Allowing infinite accumulation of
+/// slop is not desirable, because if the game is running slowly for a long time
+/// and suddenly speeds back up, it will then run too fast for a long time.
+fn limit_framerate(next_frame_due: &mut Option<Instant>, options: &Options) -> Option<Duration> {
+    let interval = if let Some(fps) = options.fps_limit {
+        1.0 / fps
+    } else {
+        return None;
+    };
+    let interval_rust = Duration::from_secs_f64(interval);
+
+    let &mut Some(current_frame_due) = next_frame_due else {
+        // First frame presented: no delay yet.
+        *next_frame_due = Some(Instant::now() + interval_rust);
+        return None;
+    };
+
+    let now = Instant::now();
+    *next_frame_due = if now > current_frame_due + interval_rust {
+        // Too much slop has accumulated. Make the next frame wait for the next
+        // interval.
+        log_dbg!("Too much slop accumulated, skipping an interval.");
+        Some(
+            current_frame_due
+                + Duration::from_secs_f64(
+                    interval * (((now - current_frame_due).as_secs_f64() / interval).ceil()),
+                ),
+        )
+    } else {
+        // Time next frame based on when the current frame was due, not
+        // the current time, so as to allow some slop.
+        Some(current_frame_due + interval_rust)
+    };
+
+    if now < current_frame_due {
+        // Frame was presented early, delay it to maintain framerate limit.
+        Some(current_frame_due.saturating_duration_since(now))
+    } else {
+        // Frame was presented on time or late, don't delay.
+        None
+    }
+}
 
 // These helper functions make the state backup code easier to read, but
 // more importantly, they make it free of mutable variables that wouldn't
@@ -484,7 +571,7 @@ unsafe fn present_renderbuffer(gles: &mut dyn GLES, window: &mut Window) {
     present_frame(
         gles,
         window.viewport(),
-        window.output_rotation_matrix(),
+        window.rotation_matrix(),
         window.virtual_cursor_visible_at(),
     );
 
@@ -509,11 +596,11 @@ unsafe fn present_renderbuffer(gles: &mut dyn GLES, window: &mut Window) {
             _ => unreachable!(),
         }
     }
-    gles.MatrixMode(old_matrix_mode);
     for mode in [gles11::MODELVIEW, gles11::PROJECTION, gles11::TEXTURE] {
         gles.MatrixMode(mode);
         gles.PopMatrix();
     }
+    gles.MatrixMode(old_matrix_mode);
     gles.Color4f(old_color[0], old_color[1], old_color[2], old_color[3]);
     gles.Viewport(
         old_viewport.0,

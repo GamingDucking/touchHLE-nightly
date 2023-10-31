@@ -4,32 +4,34 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 //! `UIView`.
+//!
+//! Useful resources:
+//! - Apple's [View Programming Guide for iOS](https://developer.apple.com/library/archive/documentation/WindowsViews/Conceptual/ViewPG_iPhoneOS/Introduction/Introduction.html)
 
+pub mod ui_alert_view;
+pub mod ui_control;
+pub mod ui_image_view;
+pub mod ui_label;
+pub mod ui_window;
+
+use super::ui_graphics::{UIGraphicsPopContext, UIGraphicsPushContext};
+use crate::frameworks::core_graphics::cg_affine_transform::CGAffineTransform;
+use crate::frameworks::core_graphics::cg_context::{CGContextClearRect, CGContextRef};
 use crate::frameworks::core_graphics::{CGFloat, CGPoint, CGRect};
-use crate::frameworks::foundation::ns_string::{get_static_str, to_rust_string};
-use crate::frameworks::foundation::NSUInteger;
+use crate::frameworks::foundation::ns_string::get_static_str;
+use crate::frameworks::foundation::{NSInteger, NSUInteger};
 use crate::objc::{
     id, msg, nil, objc_classes, release, retain, Class, ClassExports, HostObject, NSZonePtr,
 };
+use crate::Environment;
 
 #[derive(Default)]
 pub struct State {
     /// List of views for internal purposes. Non-retaining!
     pub(super) views: Vec<id>,
+    pub ui_window: ui_window::State,
 }
 
-#[derive(Default)]
-pub(super) enum UIViewSubclass {
-    #[default]
-    /// Plain `UIView*`, or some subclass that doesn't need extra data.
-    UIView,
-    UIImageView {
-        /// `UIImage*`
-        image: id,
-    },
-}
-
-#[derive(Default)]
 pub(super) struct UIViewHostObject {
     /// CALayer or subclass.
     layer: id,
@@ -37,10 +39,46 @@ pub(super) struct UIViewHostObject {
     subviews: Vec<id>,
     /// The superview. This is a weak reference.
     superview: id,
-    /// Subclass-specific data
-    pub(super) subclass: UIViewSubclass,
+    clears_context_before_drawing: bool,
+    user_interaction_enabled: bool,
+    multiple_touch_enabled: bool,
 }
 impl HostObject for UIViewHostObject {}
+impl Default for UIViewHostObject {
+    fn default() -> UIViewHostObject {
+        // The Default trait is implemented so subclasses will get the same
+        // defaults.
+        UIViewHostObject {
+            layer: nil,
+            subviews: Vec::new(),
+            superview: nil,
+            clears_context_before_drawing: true,
+            user_interaction_enabled: true,
+            multiple_touch_enabled: false,
+        }
+    }
+}
+
+/// Shared parts of `initWithCoder:` and `initWithFrame:`. These can't call
+/// `init`: the subclass may have overridden `init` and will not expect to be
+/// called here.
+///
+/// Do not call this in subclasses of `UIView`.
+fn init_common(env: &mut Environment, this: id) -> id {
+    let view_class: Class = msg![env; this class];
+    let layer_class: Class = msg![env; view_class layerClass];
+    let layer: id = msg![env; layer_class layer];
+
+    // CALayer is not opaque by default, but UIView is
+    () = msg![env; layer setDelegate:this];
+    () = msg![env; layer setOpaque:true];
+
+    env.objc.borrow_mut::<UIViewHostObject>(this).layer = layer;
+
+    env.framework_state.uikit.ui_view.views.push(this);
+
+    this
+}
 
 pub const CLASSES: ClassExports = objc_classes! {
 
@@ -59,24 +97,16 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 // TODO: accessors etc
 
+// initWithCoder: and initWithFrame: are basically UIView's designated
+// initializers. init is not, it's a shortcut for the latter.
+// Subclasses need to override both.
+
 - (id)init {
-    let view_class: Class = msg![env; this class];
-    let layer_class: Class = msg![env; view_class layerClass];
-    let layer: id = msg![env; layer_class layer];
-
-    // CALayer is not opaque by default, but UIView is
-    () = msg![env; layer setDelegate:this];
-    () = msg![env; layer setOpaque:true];
-
-    env.objc.borrow_mut::<UIViewHostObject>(this).layer = layer;
-
-    env.framework_state.uikit.ui_view.views.push(this);
-
-    this
+    msg![env; this initWithFrame:(<CGRect as Default>::default())]
 }
 
 - (id)initWithFrame:(CGRect)frame {
-    let this: id = msg![env; this init];
+    let this = init_common(env, this);
 
     () = msg![env; this setFrame:frame];
 
@@ -93,7 +123,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 // NSCoding implementation
 - (id)initWithCoder:(id)coder {
-    let this: id = msg![env; this init];
+    let this = init_common(env, this);
 
     // TODO: decode the various other UIView properties
 
@@ -137,13 +167,18 @@ pub const CLASSES: ClassExports = objc_classes! {
     this
 }
 
-- (())setUserInteractionEnabled:(bool)_enabled {
-    // TODO: enable user interaction
+- (bool)isUserInteractionEnabled {
+    env.objc.borrow::<UIViewHostObject>(this).user_interaction_enabled
+}
+- (())setUserInteractionEnabled:(bool)enabled {
+    env.objc.borrow_mut::<UIViewHostObject>(this).user_interaction_enabled = enabled;
 }
 
-// TODO: setMultipleTouchEnabled
-- (())setMultipleTouchEnabled:(bool)_enabled {
-    // TODO: enable multitouch
+- (bool)isMultipleTouchEnabled {
+    env.objc.borrow::<UIViewHostObject>(this).multiple_touch_enabled
+}
+- (())setMultipleTouchEnabled:(bool)enabled {
+    env.objc.borrow_mut::<UIViewHostObject>(this).multiple_touch_enabled = enabled;
 }
 
 - (())layoutSubviews {
@@ -156,6 +191,13 @@ pub const CLASSES: ClassExports = objc_classes! {
 // TODO: subviews accessor
 
 - (())addSubview:(id)view {
+    log_dbg!("[(UIView*){:?} addSubview:{:?}] => ()", this, view);
+
+    if view == nil {
+        log_dbg!("Tolerating [(UIView*){:?} addSubview:nil]", this);
+        return;
+    }
+
     if env.objc.borrow::<UIViewHostObject>(view).superview == this {
         () = msg![env; this bringSubviewToFront:view];
     } else {
@@ -172,6 +214,13 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (())bringSubviewToFront:(id)subview {
+    if subview == nil {
+        // This happens in Touch & Go LITE. It's probably due to the ad classes
+        // being replaced with fakes.
+        log_dbg!("Tolerating [{:?} bringSubviewToFront:nil]", this);
+        return;
+    }
+
     let &mut UIViewHostObject {
         ref mut subviews,
         layer,
@@ -212,12 +261,10 @@ pub const CLASSES: ClassExports = objc_classes! {
         layer,
         superview,
         subviews,
-        subclass,
+        clears_context_before_drawing: _,
+        user_interaction_enabled: _,
+        multiple_touch_enabled: _,
     } = std::mem::take(env.objc.borrow_mut(this));
-
-    // This assert forces subclasses to clean up their data in their dealloc
-    // implementation :)
-    assert!(matches!(subclass, UIViewSubclass::UIView));
 
     release(env, layer);
     assert!(superview == nil);
@@ -277,6 +324,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     msg![env; layer setBackgroundColor:color]
 }
 
+// TODO: support setNeedsDisplayInRect:
+- (())setNeedsDisplay {
+    let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
+    msg![env; layer setNeedsDisplay]
+}
+
 - (CGRect)bounds {
     let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
     msg![env; layer bounds]
@@ -290,7 +343,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
     msg![env; layer position]
 }
-- (())setCenter:(CGRect)center {
+- (())setCenter:(CGPoint)center {
     let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
     msg![env; layer setPosition:center]
 }
@@ -303,33 +356,93 @@ pub const CLASSES: ClassExports = objc_classes! {
     msg![env; layer setFrame:frame]
 }
 
-@end
+- (())setTransform:(CGAffineTransform)transform {
+    log!("TODO: [{:?} setTransform:{:?}]", this, transform);
+}
 
-@implementation UIAlertView: UIView
-- (id)initWithTitle:(id)title
-                      message:(id)message
-                     delegate:(id)delegate
-            cancelButtonTitle:(id)cancelButtonTitle
-            otherButtonTitles:(id)otherButtonTitles {
+- (())setContentMode:(NSInteger)content_mode { // should be UIViewContentMode
+    log!("TODO: [UIView {:?} setContentMode:{:?}] => ()", this, content_mode);
+}
 
-    log!("TODO: [(UIAlertView*){:?} initWithTitle:{:?} message:{:?} delegate:{:?} cancelButtonTitle:{:?} otherButtonTitles:{:?}]", this, title, message, delegate, cancelButtonTitle, otherButtonTitles);
+- (bool)clearsContextBeforeDrawing {
+    env.objc.borrow::<UIViewHostObject>(this).clears_context_before_drawing
+}
+- (())setClearsContextBeforeDrawing:(bool)v {
+    env.objc.borrow_mut::<UIViewHostObject>(this).clears_context_before_drawing = v;
+}
 
-    let msg = to_rust_string(env, message);
-    let title = to_rust_string(env, title);
+// Drawing stuff that views should override
+- (())drawRect:(CGRect)_rect {
+    // default implementation does nothing
+}
 
-    log!("UIAlertView: title: {:?}, message: {:?}", title, msg);
+// CALayerDelegate implementation
+- (())drawLayer:(id)layer // CALayer*
+      inContext:(CGContextRef)context {
+    let mut bounds: CGRect = msg![env; layer bounds];
+    bounds.origin = CGPoint { x: 0.0, y: 0.0 }; // FIXME: not tested
+    if env.objc.borrow::<UIViewHostObject>(this).clears_context_before_drawing {
+        CGContextClearRect(env, context, bounds);
+    }
+    UIGraphicsPushContext(env, context);
+    () = msg![env; this drawRect:bounds];
+    UIGraphicsPopContext(env);
+}
 
-    let host_object: &mut UIViewHostObject = env.objc.borrow_mut(this);
-    let layer = host_object.layer;
-    () = msg![env; layer setDelegate:this];
+// Event handling
 
-    env.framework_state.uikit.ui_view.views.push(this);
+- (bool)pointInside:(CGPoint)point
+          withEvent:(id)_event { // UIEvent* (possibly nil)
+    let layer = env.objc.borrow::<UIViewHostObject>(this).layer;
+    msg![env; layer containsPoint:point]
+}
 
+- (id)hitTest:(CGPoint)point
+    withEvent:(id)event { // UIEvent* (possibly nil)
+    if !msg![env; this pointInside:point withEvent:event] {
+        return nil;
+    }
+    // TODO: avoid copy somehow?
+    let subviews = env.objc.borrow::<UIViewHostObject>(this).subviews.clone();
+    for subview in subviews.into_iter().rev() { // later views are on top
+        let hidden: bool = msg![env; subview isHidden];
+        let alpha: CGFloat = msg![env; subview alpha];
+        let interactible: bool = msg![env; this isUserInteractionEnabled];
+        if hidden || alpha < 0.01 || !interactible {
+           continue;
+        }
+        let frame: CGRect = msg![env; subview frame];
+        let bounds: CGRect = msg![env; subview bounds];
+        let point = CGPoint {
+            x: point.x - frame.origin.x + bounds.origin.x,
+            y: point.y - frame.origin.y + bounds.origin.y,
+        };
+        let subview: id = msg![env; subview hitTest:point withEvent:event];
+        if subview != nil {
+            return subview;
+        }
+    }
     this
 }
-- (())show {
-    log!("TODO: [(UIAlertView*){:?} show]", this);
+
+// Co-ordinate space conversion
+
+- (CGPoint)convertPoint:(CGPoint)point
+               fromView:(id)other { // UIView*
+    assert!(other != nil); // TODO
+    let this_layer = env.objc.borrow::<UIViewHostObject>(this).layer;
+    let other_layer = env.objc.borrow::<UIViewHostObject>(other).layer;
+    msg![env; this_layer convertPoint:point fromLayer:other_layer]
 }
+
+- (CGPoint)convertPoint:(CGPoint)point
+                 toView:(id)other { // UIView*
+    assert!(other != nil); // TODO
+    let this_layer = env.objc.borrow::<UIViewHostObject>(this).layer;
+    let other_layer = env.objc.borrow::<UIViewHostObject>(other).layer;
+    msg![env; this_layer convertPoint:point toLayer:other_layer]
+}
+
 @end
 
 };

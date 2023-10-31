@@ -14,12 +14,19 @@
 
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::gles::gles11_raw as gles11; // constants only
-use crate::gles::gles11_raw::types::*;
 use crate::gles::GLES;
-use crate::mem::{ConstPtr, ConstVoidPtr, GuestUSize, Mem, MutPtr};
+use crate::mem::{ConstPtr, ConstVoidPtr, GuestISize, GuestUSize, Mem, MutPtr};
 use crate::Environment;
-
 use core::ffi::CStr;
+
+// These types are the same size in guest code (32-bit) and host code (64-bit).
+use crate::gles::gles11_raw::types::{
+    GLbitfield, GLboolean, GLclampf, GLclampx, GLenum, GLfixed, GLfloat, GLint, GLsizei, GLubyte,
+    GLuint, GLvoid,
+};
+// These types have different sizes, so some care is needed.
+use crate::gles::gles11_raw::types::GLsizeiptr as HostGLsizeiptr;
+type GuestGLsizeiptr = GuestISize;
 
 fn with_ctx_and_mem<T, U>(env: &mut Environment, f: T) -> U
 where
@@ -28,7 +35,9 @@ where
     let gles = super::sync_context(
         &mut env.framework_state.opengles,
         &mut env.objc,
-        &mut env.window,
+        env.window
+            .as_mut()
+            .expect("OpenGL ES is not supported in headless mode"),
         env.current_thread,
     );
 
@@ -111,6 +120,9 @@ fn glGetIntegerv(env: &mut Environment, pname: GLenum, params: MutPtr<GLint>) {
 }
 fn glHint(env: &mut Environment, target: GLenum, mode: GLenum) {
     with_ctx_and_mem(env, |gles, _mem| unsafe { gles.Hint(target, mode) })
+}
+fn glFlush(env: &mut Environment) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe { gles.Flush() })
 }
 fn glGetString(env: &mut Environment, name: GLenum) -> ConstPtr<GLubyte> {
     with_ctx_and_mem(env, |gles, mem| {
@@ -271,6 +283,23 @@ fn glDeleteBuffers(env: &mut Environment, n: GLsizei, buffers: ConstPtr<GLuint>)
 fn glBindBuffer(env: &mut Environment, target: GLenum, buffer: GLuint) {
     with_ctx_and_mem(env, |gles, _mem| unsafe { gles.BindBuffer(target, buffer) })
 }
+fn glBufferData(
+    env: &mut Environment,
+    target: GLenum,
+    size: GuestGLsizeiptr,
+    data: ConstPtr<GLvoid>,
+    usage: GLenum,
+) {
+    with_ctx_and_mem(env, |gles, mem| unsafe {
+        let data = if data.is_null() {
+            std::ptr::null()
+        } else {
+            mem.ptr_at(data.cast::<u8>(), size.try_into().unwrap())
+                .cast()
+        };
+        gles.BufferData(target, size as HostGLsizeiptr, data, usage)
+    })
+}
 
 // Non-pointers
 fn glColor4f(env: &mut Environment, red: GLfloat, green: GLfloat, blue: GLfloat, alpha: GLfloat) {
@@ -281,6 +310,11 @@ fn glColor4f(env: &mut Environment, red: GLfloat, green: GLfloat, blue: GLfloat,
 fn glColor4x(env: &mut Environment, red: GLfixed, green: GLfixed, blue: GLfixed, alpha: GLfixed) {
     with_ctx_and_mem(env, |gles, _mem| unsafe {
         gles.Color4x(red, green, blue, alpha)
+    })
+}
+fn glColor4ub(env: &mut Environment, red: GLubyte, green: GLubyte, blue: GLubyte, alpha: GLubyte) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.Color4ub(red, green, blue, alpha)
     })
 }
 
@@ -560,19 +594,89 @@ fn glBindTexture(env: &mut Environment, target: GLenum, texture: GLuint) {
     })
 }
 fn glTexParameteri(env: &mut Environment, target: GLenum, pname: GLenum, param: GLint) {
+    // So long as we haven't implemented glDrawTexOES yet, we can just ignore
+    // this parameter, because it doesn't do anything for normal texture use.
+    if pname == gles11::TEXTURE_CROP_RECT_OES {
+        return;
+    }
     with_ctx_and_mem(env, |gles, _mem| unsafe {
         gles.TexParameteri(target, pname, param)
     })
 }
 fn glTexParameterf(env: &mut Environment, target: GLenum, pname: GLenum, param: GLfloat) {
+    // See above.
+    if pname == gles11::TEXTURE_CROP_RECT_OES {
+        return;
+    }
     with_ctx_and_mem(env, |gles, _mem| unsafe {
         gles.TexParameterf(target, pname, param)
     })
 }
 fn glTexParameterx(env: &mut Environment, target: GLenum, pname: GLenum, param: GLfixed) {
+    // See above.
+    if pname == gles11::TEXTURE_CROP_RECT_OES {
+        return;
+    }
     with_ctx_and_mem(env, |gles, _mem| unsafe {
         gles.TexParameterx(target, pname, param)
     })
+}
+fn glTexParameteriv(env: &mut Environment, target: GLenum, pname: GLenum, params: ConstPtr<GLint>) {
+    // See above.
+    if pname == gles11::TEXTURE_CROP_RECT_OES {
+        return;
+    }
+    with_ctx_and_mem(env, |gles, mem| unsafe {
+        let params = mem.ptr_at(params, 1 /* upper bound */);
+        gles.TexParameteriv(target, pname, params)
+    })
+}
+fn glTexParameterfv(
+    env: &mut Environment,
+    target: GLenum,
+    pname: GLenum,
+    params: ConstPtr<GLfloat>,
+) {
+    // See above.
+    if pname == gles11::TEXTURE_CROP_RECT_OES {
+        return;
+    }
+    with_ctx_and_mem(env, |gles, mem| unsafe {
+        let params = mem.ptr_at(params, 1 /* upper bound */);
+        gles.TexParameterfv(target, pname, params)
+    })
+}
+fn glTexParameterxv(
+    env: &mut Environment,
+    target: GLenum,
+    pname: GLenum,
+    params: ConstPtr<GLfixed>,
+) {
+    // See above.
+    if pname == gles11::TEXTURE_CROP_RECT_OES {
+        return;
+    }
+    with_ctx_and_mem(env, |gles, mem| unsafe {
+        let params = mem.ptr_at(params, 1 /* upper bound */);
+        gles.TexParameterxv(target, pname, params)
+    })
+}
+fn image_size_estimate(pixel_count: GuestUSize, format: GLenum, type_: GLenum) -> GuestUSize {
+    let bytes_per_pixel: GuestUSize = match type_ {
+        gles11::UNSIGNED_BYTE => match format {
+            gles11::ALPHA | gles11::LUMINANCE => 1,
+            gles11::LUMINANCE_ALPHA => 2,
+            gles11::RGB => 3,
+            gles11::RGBA => 4,
+            _ => panic!("Unexpected format {:#x}", format),
+        },
+        gles11::UNSIGNED_SHORT_5_6_5
+        | gles11::UNSIGNED_SHORT_4_4_4_4
+        | gles11::UNSIGNED_SHORT_5_5_5_1 => 2,
+        _ => panic!("Unexpected type {:#x}", type_),
+    };
+    // This is approximate, it doesn't account for alignment.
+    pixel_count.checked_mul(bytes_per_pixel).unwrap()
 }
 fn glTexImage2D(
     env: &mut Environment,
@@ -590,23 +694,9 @@ fn glTexImage2D(
         let pixels = if pixels.is_null() {
             std::ptr::null()
         } else {
-            let bytes_per_pixel: GuestUSize = match type_ {
-                gles11::UNSIGNED_BYTE => match format {
-                    gles11::ALPHA | gles11::LUMINANCE => 1,
-                    gles11::LUMINANCE_ALPHA => 2,
-                    gles11::RGB => 3,
-                    gles11::RGBA => 4,
-                    _ => panic!("Unexpected format {:#x}", format),
-                },
-                gles11::UNSIGNED_SHORT_5_6_5
-                | gles11::UNSIGNED_SHORT_4_4_4_4
-                | gles11::UNSIGNED_SHORT_5_5_5_1 => 2,
-                _ => panic!("Unexpected type {:#x}", type_),
-            };
             let pixel_count: GuestUSize = width.checked_mul(height).unwrap().try_into().unwrap();
-            // This is approximate, it doesn't account for alignment.
-            mem.ptr_at(pixels.cast::<u8>(), pixel_count * bytes_per_pixel)
-                .cast::<GLvoid>()
+            let size = image_size_estimate(pixel_count, format, type_);
+            mem.ptr_at(pixels.cast::<u8>(), size).cast::<GLvoid>()
         };
         gles.TexImage2D(
             target,
@@ -618,6 +708,27 @@ fn glTexImage2D(
             format,
             type_,
             pixels,
+        )
+    })
+}
+fn glTexSubImage2D(
+    env: &mut Environment,
+    target: GLenum,
+    level: GLint,
+    xoffset: GLint,
+    yoffset: GLint,
+    width: GLsizei,
+    height: GLsizei,
+    format: GLenum,
+    type_: GLenum,
+    pixels: ConstVoidPtr,
+) {
+    with_ctx_and_mem(env, |gles, mem| unsafe {
+        let pixel_count: GuestUSize = width.checked_mul(height).unwrap().try_into().unwrap();
+        let size = image_size_estimate(pixel_count, format, type_);
+        let pixels = mem.ptr_at(pixels.cast::<u8>(), size).cast::<GLvoid>();
+        gles.TexSubImage2D(
+            target, level, xoffset, yoffset, width, height, format, type_, pixels,
         )
     })
 }
@@ -661,6 +772,21 @@ fn glCopyTexImage2D(
 ) {
     with_ctx_and_mem(env, |gles, _mem| unsafe {
         gles.CopyTexImage2D(target, level, internalformat, x, y, width, height, border)
+    })
+}
+fn glCopyTexSubImage2D(
+    env: &mut Environment,
+    target: GLenum,
+    level: GLint,
+    xoffset: GLint,
+    yoffset: GLint,
+    x: GLint,
+    y: GLint,
+    width: GLsizei,
+    height: GLsizei,
+) {
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.CopyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height)
     })
 }
 fn glTexEnvf(env: &mut Environment, target: GLenum, pname: GLenum, param: GLfloat) {
@@ -817,6 +943,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(glGetFloatv(_, _)),
     export_c_func!(glGetIntegerv(_, _)),
     export_c_func!(glHint(_, _)),
+    export_c_func!(glFlush()),
     export_c_func!(glGetString(_)),
     // Other state manipulation
     export_c_func!(glAlphaFunc(_, _)),
@@ -849,9 +976,11 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(glGenBuffers(_, _)),
     export_c_func!(glDeleteBuffers(_, _)),
     export_c_func!(glBindBuffer(_, _)),
+    export_c_func!(glBufferData(_, _, _, _)),
     // Non-pointers
     export_c_func!(glColor4f(_, _, _, _)),
     export_c_func!(glColor4x(_, _, _, _)),
+    export_c_func!(glColor4ub(_, _, _, _)),
     // Pointers
     export_c_func!(glColorPointer(_, _, _, _)),
     export_c_func!(glNormalPointer(_, _, _)),
@@ -895,9 +1024,14 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(glTexParameteri(_, _, _)),
     export_c_func!(glTexParameterf(_, _, _)),
     export_c_func!(glTexParameterx(_, _, _)),
+    export_c_func!(glTexParameteriv(_, _, _)),
+    export_c_func!(glTexParameterfv(_, _, _)),
+    export_c_func!(glTexParameterxv(_, _, _)),
     export_c_func!(glTexImage2D(_, _, _, _, _, _, _, _, _)),
+    export_c_func!(glTexSubImage2D(_, _, _, _, _, _, _, _, _)),
     export_c_func!(glCompressedTexImage2D(_, _, _, _, _, _, _, _)),
     export_c_func!(glCopyTexImage2D(_, _, _, _, _, _, _, _)),
+    export_c_func!(glCopyTexSubImage2D(_, _, _, _, _, _, _, _)),
     export_c_func!(glTexEnvf(_, _, _)),
     export_c_func!(glTexEnvx(_, _, _)),
     export_c_func!(glTexEnvi(_, _, _)),

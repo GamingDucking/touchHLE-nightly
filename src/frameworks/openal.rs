@@ -108,6 +108,15 @@ fn alcDestroyContext(env: &mut Environment, context: MutPtr<GuestALCcontext>) {
     log_dbg!("alcDestroyContext({:?})", context);
 }
 
+fn alcProcessContext(env: &mut Environment, context: MutPtr<GuestALCcontext>) {
+    let host_context = State::get(env).contexts.get(&context).copied().unwrap();
+    unsafe { al::alcProcessContext(host_context) }
+}
+fn alcSuspendContext(env: &mut Environment, context: MutPtr<GuestALCcontext>) {
+    let host_context = State::get(env).contexts.get(&context).copied().unwrap();
+    unsafe { al::alcSuspendContext(host_context) }
+}
+
 fn alcMakeContextCurrent(env: &mut Environment, context: MutPtr<GuestALCcontext>) -> bool {
     let host_context = if context.is_null() {
         std::ptr::null_mut()
@@ -117,6 +126,34 @@ fn alcMakeContextCurrent(env: &mut Environment, context: MutPtr<GuestALCcontext>
     let res = unsafe { al::alcMakeContextCurrent(host_context) };
     log_dbg!("alcMakeContextCurrent({:?}) => {:?}", context, res);
     res != al::ALC_FALSE
+}
+
+fn alcGetCurrentContext(env: &mut Environment) -> MutPtr<GuestALCcontext> {
+    let host_context = unsafe { al::alcGetCurrentContext() };
+    if host_context.is_null() {
+        Ptr::null()
+    } else {
+        *State::get(env)
+            .contexts
+            .iter()
+            .find(|(&_guest, &host)| host == host_context)
+            .unwrap()
+            .0
+    }
+}
+
+fn alcGetContextsDevice(
+    env: &mut Environment,
+    context: MutPtr<GuestALCcontext>,
+) -> MutPtr<GuestALCdevice> {
+    let host_context = State::get(env).contexts.get(&context).copied().unwrap();
+    let host_device = unsafe { al::alcGetContextsDevice(host_context) };
+    *State::get(env)
+        .devices
+        .iter()
+        .find(|(&_guest, &host)| host == host_device)
+        .unwrap()
+        .0
 }
 
 fn alcGetProcAddress(
@@ -167,14 +204,80 @@ fn alDistanceModel(_env: &mut Environment, value: ALenum) {
 fn alListenerf(_env: &mut Environment, param: ALenum, value: ALfloat) {
     unsafe { al::alListenerf(param, value) };
 }
+fn alListenerfv(env: &mut Environment, param: ALenum, values: ConstPtr<ALfloat>) {
+    // we assume that at least 1 parameter should be passed
+    let values = env.mem.ptr_at(values, 1);
+    unsafe { al::alListenerfv(param, values) };
+}
 fn alListener3f(
     _env: &mut Environment,
+
     param: ALenum,
     value1: ALfloat,
     value2: ALfloat,
     value3: ALfloat,
 ) {
     unsafe { al::alListener3f(param, value1, value2, value3) };
+}
+fn alListeneri(_env: &mut Environment, param: ALenum, value: ALint) {
+    unsafe { al::alListeneri(param, value) };
+}
+fn alListener3i(
+    _env: &mut Environment,
+
+    param: ALenum,
+    value1: ALint,
+    value2: ALint,
+    value3: ALint,
+) {
+    unsafe { al::alListener3i(param, value1, value2, value3) };
+}
+fn alListeneriv(env: &mut Environment, param: ALenum, values: ConstPtr<ALint>) {
+    let values = env.mem.ptr_at(values, 3); // upper bound
+    unsafe { al::alListeneriv(param, values) };
+}
+
+fn alGetListenerf(env: &mut Environment, param: ALenum, value: MutPtr<ALfloat>) {
+    unsafe { al::alGetListenerf(param, env.mem.ptr_at_mut(value, 1)) };
+}
+fn alGetListener3f(
+    env: &mut Environment,
+
+    param: ALenum,
+    value1: MutPtr<ALfloat>,
+    value2: MutPtr<ALfloat>,
+    value3: MutPtr<ALfloat>,
+) {
+    let mut values = [0.0; 3];
+    unsafe { al::alGetListener3f(param, &mut values[0], &mut values[1], &mut values[2]) };
+    env.mem.write(value1, values[0]);
+    env.mem.write(value2, values[1]);
+    env.mem.write(value3, values[2]);
+}
+fn alGetListenerfv(env: &mut Environment, param: ALenum, values: MutPtr<ALfloat>) {
+    let values = env.mem.ptr_at_mut(values, 3); // upper bound
+    unsafe { al::alGetListenerfv(param, values) };
+}
+fn alGetListeneri(env: &mut Environment, param: ALenum, value: MutPtr<ALint>) {
+    unsafe { al::alGetListeneri(param, env.mem.ptr_at_mut(value, 1)) };
+}
+fn alGetListener3i(
+    env: &mut Environment,
+
+    param: ALenum,
+    value1: MutPtr<ALint>,
+    value2: MutPtr<ALint>,
+    value3: MutPtr<ALint>,
+) {
+    let mut values = [0; 3];
+    unsafe { al::alGetListener3i(param, &mut values[0], &mut values[1], &mut values[2]) };
+    env.mem.write(value1, values[0]);
+    env.mem.write(value2, values[1]);
+    env.mem.write(value3, values[2]);
+}
+fn alGetListeneriv(env: &mut Environment, param: ALenum, values: MutPtr<ALint>) {
+    let values = env.mem.ptr_at_mut(values, 3); // upper bound
+    unsafe { al::alGetListeneriv(param, values) };
 }
 
 fn alGenSources(env: &mut Environment, n: ALsizei, sources: MutPtr<ALuint>) {
@@ -191,14 +294,96 @@ fn alDeleteSources(env: &mut Environment, n: ALsizei, sources: ConstPtr<ALuint>)
 fn alSourcef(_env: &mut Environment, source: ALuint, param: ALenum, value: ALfloat) {
     unsafe { al::alSourcef(source, param, value) };
 }
+fn alSourcefv(env: &mut Environment, source: ALuint, param: ALenum, values: ConstPtr<ALfloat>) {
+    // we assume that at least 1 parameter should be passed
+    let values = env.mem.ptr_at(values, 1);
+    unsafe { al::alSourcefv(source, param, values) };
+}
+fn alSource3f(
+    _env: &mut Environment,
+    source: ALuint,
+    param: ALenum,
+    value1: ALfloat,
+    value2: ALfloat,
+    value3: ALfloat,
+) {
+    unsafe { al::alSource3f(source, param, value1, value2, value3) };
+}
 fn alSourcei(_env: &mut Environment, source: ALuint, param: ALenum, value: ALint) {
     unsafe { al::alSourcei(source, param, value) };
 }
+fn alSource3i(
+    _env: &mut Environment,
+    source: ALuint,
+    param: ALenum,
+    value1: ALint,
+    value2: ALint,
+    value3: ALint,
+) {
+    unsafe { al::alSource3i(source, param, value1, value2, value3) };
+}
+fn alSourceiv(env: &mut Environment, source: ALuint, param: ALenum, values: ConstPtr<ALint>) {
+    let values = env.mem.ptr_at(values, 3); // upper bound
+    unsafe { al::alSourceiv(source, param, values) };
+}
+
 fn alGetSourcef(env: &mut Environment, source: ALuint, param: ALenum, value: MutPtr<ALfloat>) {
     unsafe { al::alGetSourcef(source, param, env.mem.ptr_at_mut(value, 1)) };
 }
+fn alGetSource3f(
+    env: &mut Environment,
+    source: ALuint,
+    param: ALenum,
+    value1: MutPtr<ALfloat>,
+    value2: MutPtr<ALfloat>,
+    value3: MutPtr<ALfloat>,
+) {
+    let mut values = [0.0; 3];
+    unsafe {
+        al::alGetSource3f(
+            source,
+            param,
+            &mut values[0],
+            &mut values[1],
+            &mut values[2],
+        )
+    };
+    env.mem.write(value1, values[0]);
+    env.mem.write(value2, values[1]);
+    env.mem.write(value3, values[2]);
+}
+fn alGetSourcefv(env: &mut Environment, source: ALuint, param: ALenum, values: MutPtr<ALfloat>) {
+    let values = env.mem.ptr_at_mut(values, 3); // upper bound
+    unsafe { al::alGetSourcefv(source, param, values) };
+}
 fn alGetSourcei(env: &mut Environment, source: ALuint, param: ALenum, value: MutPtr<ALint>) {
     unsafe { al::alGetSourcei(source, param, env.mem.ptr_at_mut(value, 1)) };
+}
+fn alGetSource3i(
+    env: &mut Environment,
+    source: ALuint,
+    param: ALenum,
+    value1: MutPtr<ALint>,
+    value2: MutPtr<ALint>,
+    value3: MutPtr<ALint>,
+) {
+    let mut values = [0; 3];
+    unsafe {
+        al::alGetSource3i(
+            source,
+            param,
+            &mut values[0],
+            &mut values[1],
+            &mut values[2],
+        )
+    };
+    env.mem.write(value1, values[0]);
+    env.mem.write(value2, values[1]);
+    env.mem.write(value3, values[2]);
+}
+fn alGetSourceiv(env: &mut Environment, source: ALuint, param: ALenum, values: MutPtr<ALint>) {
+    let values = env.mem.ptr_at_mut(values, 3); // upper bound
+    unsafe { al::alGetSourceiv(source, param, values) };
 }
 
 fn alSourcePlay(_env: &mut Environment, source: ALuint) {
@@ -209,6 +394,9 @@ fn alSourcePause(_env: &mut Environment, source: ALuint) {
 }
 fn alSourceStop(_env: &mut Environment, source: ALuint) {
     unsafe { al::alSourceStop(source) };
+}
+fn alSourceRewind(_env: &mut Environment, source: ALuint) {
+    unsafe { al::alSourceRewind(source) };
 }
 
 fn alSourceQueueBuffers(
@@ -311,12 +499,6 @@ fn alcMacOSXMixerOutputRate(_env: &mut Environment, value: ALdouble) {
     log!("App wants to set mixer output sample rate to {} Hz", value);
 }
 
-fn alListenerfv(env: &mut Environment, param: ALenum, values: ConstPtr<ALfloat>) {
-    // we assume that at least 1 parameter should be passed
-    let values = env.mem.ptr_at(values, 1);
-    unsafe { al::alListenerfv(param, values) };
-}
-
 fn alDopplerFactor(_env: &mut Environment, value: ALfloat) {
     unsafe { al::alDopplerFactor(value) };
 }
@@ -335,26 +517,11 @@ fn alDopplerVelocity(env: &mut Environment, value: ALfloat) {
     unsafe { al::alDopplerVelocity(value) };
 }
 
-fn alSourcefv(env: &mut Environment, source: ALuint, param: ALenum, values: ConstPtr<ALfloat>) {
-    // we assume that at least 1 parameter should be passed
-    let values = env.mem.ptr_at(values, 1);
-    unsafe { al::alSourcefv(source, param, values) };
-}
-
 // TODO: more functions
 
 // Note: For some reasons Wolf3d registers many OpenAl functions, but actually uses only few ones.
 // To workaround this, we just provide stubs
 
-fn alcGetContextsDevice(
-    _env: &mut Environment,
-    _context: MutPtr<GuestALCcontext>,
-) -> MutPtr<GuestALCdevice> {
-    todo!();
-}
-fn alcGetCurrentContext(_env: &mut Environment) -> MutPtr<GuestALCcontext> {
-    todo!();
-}
 fn alcGetEnumValue(
     _env: &mut Environment,
     _device: MutPtr<GuestALCdevice>,
@@ -384,12 +551,6 @@ fn alcIsExtensionPresent(
     _extName: ConstPtr<u8>,
 ) -> ALCboolean {
     0
-}
-fn alcProcessContext(_env: &mut Environment, _context: MutPtr<GuestALCcontext>) {
-    todo!();
-}
-fn alcSuspendContext(_env: &mut Environment, _context: MutPtr<GuestALCcontext>) {
-    todo!();
 }
 fn alIsBuffer(_env: &mut Environment, _buffer: ALuint) -> ALboolean {
     todo!();
@@ -445,56 +606,7 @@ fn alIsExtensionPresent(_env: &mut Environment, _extName: ConstPtr<u8>) -> ALboo
 fn alIsEnabled(_env: &mut Environment, _capability: ALenum) -> ALboolean {
     todo!();
 }
-fn alListeneri(_env: &mut Environment, _param: ALenum, _value: ALint) {
-    todo!();
-}
-fn alGetListenerf(_env: &mut Environment, _param: ALenum, _value: MutPtr<ALfloat>) {
-    todo!();
-}
-fn alGetListener3f(
-    _env: &mut Environment,
-    _param: ALenum,
-    _value1: MutPtr<ALfloat>,
-    _value2: MutPtr<ALfloat>,
-    _value3: MutPtr<ALfloat>,
-) {
-    todo!();
-}
-fn alGetListenerfv(_env: &mut Environment, _param: ALenum, _values: MutPtr<ALfloat>) {
-    todo!();
-}
-fn alGetListeneri(_env: &mut Environment, _param: ALenum, _value: MutPtr<ALint>) {
-    todo!();
-}
 fn alIsSource(_env: &mut Environment, _source: ALuint) -> ALboolean {
-    todo!();
-}
-fn alSource3f(
-    _env: &mut Environment,
-    _source: ALuint,
-    _param: ALenum,
-    _value1: ALfloat,
-    _value2: ALfloat,
-    _value3: ALfloat,
-) {
-    todo!();
-}
-fn alGetSource3f(
-    _env: &mut Environment,
-    _source: ALuint,
-    _param: ALenum,
-    _value1: MutPtr<ALfloat>,
-    _value2: MutPtr<ALfloat>,
-    _value3: MutPtr<ALfloat>,
-) {
-    todo!();
-}
-fn alGetSourcefv(
-    _env: &mut Environment,
-    _source: ALuint,
-    _param: ALenum,
-    _values: MutPtr<ALfloat>,
-) {
     todo!();
 }
 fn alSourcePlayv(_env: &mut Environment, _nsources: ALsizei, _sources: ConstPtr<ALuint>) {
@@ -504,9 +616,6 @@ fn alSourcePausev(_env: &mut Environment, _nsources: ALsizei, _sources: ConstPtr
     todo!();
 }
 fn alSourceStopv(_env: &mut Environment, _nsources: ALsizei, _sources: ConstPtr<ALuint>) {
-    todo!();
-}
-fn alSourceRewind(_env: &mut Environment, _source: ALuint) {
     todo!();
 }
 fn alSourceRewindv(_env: &mut Environment, _nsources: ALsizei, _sources: ConstPtr<ALuint>) {
@@ -519,21 +628,42 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(alcGetError(_)),
     export_c_func!(alcCreateContext(_, _)),
     export_c_func!(alcDestroyContext(_)),
+    export_c_func!(alcProcessContext(_)),
+    export_c_func!(alcSuspendContext(_)),
     export_c_func!(alcMakeContextCurrent(_)),
     export_c_func!(alcGetProcAddress(_, _)),
     export_c_func!(alGetError()),
     export_c_func!(alDistanceModel(_)),
     export_c_func!(alListenerf(_, _)),
     export_c_func!(alListener3f(_, _, _, _)),
+    export_c_func!(alListenerfv(_, _)),
+    export_c_func!(alListeneri(_, _)),
+    export_c_func!(alListener3i(_, _, _, _)),
+    export_c_func!(alListeneriv(_, _)),
+    export_c_func!(alGetListenerf(_, _)),
+    export_c_func!(alGetListener3f(_, _, _, _)),
+    export_c_func!(alGetListenerfv(_, _)),
+    export_c_func!(alGetListeneri(_, _)),
+    export_c_func!(alGetListener3i(_, _, _, _)),
+    export_c_func!(alGetListeneriv(_, _)),
     export_c_func!(alGenSources(_, _)),
     export_c_func!(alDeleteSources(_, _)),
-    export_c_func!(alGetSourcef(_, _, _)),
-    export_c_func!(alGetSourcei(_, _, _)),
     export_c_func!(alSourcef(_, _, _)),
+    export_c_func!(alSource3f(_, _, _, _, _)),
+    export_c_func!(alSourcefv(_, _, _)),
     export_c_func!(alSourcei(_, _, _)),
+    export_c_func!(alSource3i(_, _, _, _, _)),
+    export_c_func!(alSourceiv(_, _, _)),
+    export_c_func!(alGetSourcef(_, _, _)),
+    export_c_func!(alGetSource3f(_, _, _, _, _)),
+    export_c_func!(alGetSourcefv(_, _, _)),
+    export_c_func!(alGetSourcei(_, _, _)),
+    export_c_func!(alGetSource3i(_, _, _, _, _)),
+    export_c_func!(alGetSourceiv(_, _, _)),
     export_c_func!(alSourcePlay(_)),
     export_c_func!(alSourcePause(_)),
     export_c_func!(alSourceStop(_)),
+    export_c_func!(alSourceRewind(_)),
     export_c_func!(alSourceQueueBuffers(_, _, _)),
     export_c_func!(alSourceUnqueueBuffers(_, _, _)),
     export_c_func!(alGenBuffers(_, _)),
@@ -547,8 +677,6 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(alcGetIntegerv(_, _, _, _)),
     export_c_func!(alcGetString(_, _)),
     export_c_func!(alcIsExtensionPresent(_, _)),
-    export_c_func!(alcProcessContext(_)),
-    export_c_func!(alcSuspendContext(_)),
     export_c_func!(alIsBuffer(_)),
     export_c_func!(alGetBufferf(_, _, _)),
     export_c_func!(alGetBufferi(_, _, _)),
@@ -576,14 +704,9 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(alGetListenerfv(_, _)),
     export_c_func!(alGetListeneri(_, _)),
     export_c_func!(alIsSource(_)),
-    export_c_func!(alSourcefv(_, _, _)),
-    export_c_func!(alSource3f(_, _, _, _, _)),
-    export_c_func!(alGetSource3f(_, _, _, _, _)),
-    export_c_func!(alGetSourcefv(_, _, _)),
     export_c_func!(alSourcePlayv(_, _)),
     export_c_func!(alSourcePause(_)),
     export_c_func!(alSourcePausev(_, _)),
     export_c_func!(alSourceStopv(_, _)),
-    export_c_func!(alSourceRewind(_)),
     export_c_func!(alSourceRewindv(_, _)),
 ];

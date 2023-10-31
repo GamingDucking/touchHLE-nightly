@@ -12,12 +12,16 @@ use std::io::{BufRead, BufReader, Read};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::num::NonZeroU32;
 
-pub const DOCUMENTATION: &str =
+pub const OPTIONS_HELP: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/OPTIONS_HELP.txt"));
 
 /// Game controller button for `--button-to-touch=` option.
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
 pub enum Button {
+    DPadLeft,
+    DPadUp,
+    DPadRight,
+    DPadDown,
     A,
     B,
     X,
@@ -35,9 +39,14 @@ pub struct Options {
     pub x_tilt_offset: f32,
     pub y_tilt_offset: f32,
     pub button_to_touch: HashMap<Button, (f32, f32)>,
+    pub stabilize_virtual_cursor: Option<(f32, f32)>,
     pub gles1_implementation: Option<GLESImplementation>,
     pub direct_memory_access: bool,
     pub gdb_listen_addrs: Option<Vec<SocketAddr>>,
+    pub preferred_languages: Option<Vec<String>>,
+    pub headless: bool,
+    pub print_fps: bool,
+    pub fps_limit: Option<f64>,
 }
 
 impl Default for Options {
@@ -52,9 +61,14 @@ impl Default for Options {
             x_tilt_offset: 0.0,
             y_tilt_offset: 0.0,
             button_to_touch: HashMap::new(),
+            stabilize_virtual_cursor: None,
             gles1_implementation: None,
             direct_memory_access: true,
             gdb_listen_addrs: None,
+            preferred_languages: None,
+            headless: false,
+            print_fps: false,
+            fps_limit: Some(60.0), // Original iPhone is 60Hz and uses v-sync
         }
     }
 }
@@ -102,6 +116,10 @@ impl Options {
                 .split_once(',')
                 .ok_or_else(|| "--button-to-touch= requires three values".to_string())?;
             let button = match button {
+                "DPadLeft" => Ok(Button::DPadLeft),
+                "DPadUp" => Ok(Button::DPadUp),
+                "DPadRight" => Ok(Button::DPadRight),
+                "DPadDown" => Ok(Button::DPadDown),
                 "A" => Ok(Button::A),
                 "B" => Ok(Button::B),
                 "X" => Ok(Button::X),
@@ -115,6 +133,25 @@ impl Options {
                 .parse()
                 .map_err(|_| "Invalid Y co-ordinate for --button-to-touch=".to_string())?;
             self.button_to_touch.insert(button, (x, y));
+        } else if let Some(value) = arg.strip_prefix("--stabilize-virtual-cursor=") {
+            let (smoothing_strength, sticky_radius) = value
+                .split_once(',')
+                .ok_or_else(|| "--stabilize-virtual-cursor= requires two values".to_string())?;
+            let smoothing_strength: f32 = smoothing_strength
+                .parse()
+                .ok()
+                .and_then(|s| if s < 0.0 { None } else { Some(s) })
+                .ok_or_else(|| {
+                    "Invalid smoothing strength for --stabilize-virtual-cursor=".to_string()
+                })?;
+            let sticky_radius: f32 = sticky_radius
+                .parse()
+                .ok()
+                .and_then(|s| if s < 0.0 { None } else { Some(s) })
+                .ok_or_else(|| {
+                    "Invalid sticky radius for --stabilize-virtual-cursor=".to_string()
+                })?;
+            self.stabilize_virtual_cursor = Some((smoothing_strength, sticky_radius));
         } else if let Some(value) = arg.strip_prefix("--gles1=") {
             self.gles1_implementation = Some(
                 GLESImplementation::from_short_name(value)
@@ -128,6 +165,23 @@ impl Options {
                 .map_err(|e| format!("Could not resolve GDB server listen address: {}", e))?
                 .collect();
             self.gdb_listen_addrs = Some(addrs);
+        } else if let Some(value) = arg.strip_prefix("--preferred-languages=") {
+            self.preferred_languages = Some(value.split(',').map(ToOwned::to_owned).collect());
+        } else if arg == "--headless" {
+            self.headless = true;
+        } else if arg == "--print-fps" {
+            self.print_fps = true;
+        } else if let Some(value) = arg.strip_prefix("--fps-limit=") {
+            if value == "off" {
+                self.fps_limit = None;
+            } else {
+                let limit: f64 = value
+                    .parse()
+                    .ok()
+                    .and_then(|v| if v <= 0.0 { None } else { Some(v) })
+                    .ok_or_else(|| "Invalid value for --fps-limit=".to_string())?;
+                self.fps_limit = Some(limit);
+            }
         } else {
             return Ok(false);
         };

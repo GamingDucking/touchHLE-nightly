@@ -9,6 +9,34 @@
 use super::gles11_raw as gles11; // constants and types only
 use super::GLES;
 use crate::matrix::Matrix;
+use std::time::{Duration, Instant};
+
+pub struct FpsCounter {
+    time: std::time::Instant,
+    frames: u32,
+}
+impl FpsCounter {
+    pub fn start() -> Self {
+        FpsCounter {
+            time: Instant::now(),
+            frames: 0,
+        }
+    }
+
+    pub fn count_frame(&mut self, label: std::fmt::Arguments<'_>) {
+        self.frames += 1;
+        let now = Instant::now();
+        let duration = now - self.time;
+        if duration >= Duration::from_secs(1) {
+            self.time = now;
+            echo!(
+                "touchHLE: {} FPS: {:.2}",
+                label,
+                std::mem::take(&mut self.frames) as f32 / duration.as_secs_f32()
+            );
+        }
+    }
+}
 
 /// Present the the latest frame (e.g. the app's splash screen or rendering
 /// output), provided as a texture bound to `GL_TEXTURE_2D`, by drawing it on
@@ -19,7 +47,7 @@ use crate::matrix::Matrix;
 pub unsafe fn present_frame(
     gles: &mut dyn GLES,
     viewport: (u32, u32, u32, u32),
-    output_rotation_matrix: Matrix<2>,
+    rotation_matrix: Matrix<2>,
     virtual_cursor_visible_at: Option<(f32, f32, bool)>,
 ) {
     // While this is a generic utility, it is closely tied to
@@ -47,7 +75,7 @@ pub unsafe fn present_frame(
     let tex_coords: [f32; 12] = [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
     gles.EnableClientState(gles11::TEXTURE_COORD_ARRAY);
     gles.TexCoordPointer(2, gles11::FLOAT, 0, tex_coords.as_ptr() as *const GLvoid);
-    let matrix = Matrix::<4>::from(&output_rotation_matrix);
+    let matrix = Matrix::<4>::from(&rotation_matrix);
     gles.MatrixMode(gles11::TEXTURE);
     gles.LoadMatrixf(matrix.columns().as_ptr() as *const _);
     gles.Enable(gles11::TEXTURE_2D);

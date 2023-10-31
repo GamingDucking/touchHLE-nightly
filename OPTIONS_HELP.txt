@@ -42,22 +42,29 @@ Game controller options:
 
     --x-tilt-range=...
     --y-tilt-range=...
-        Set the simulated rotation range of the device on its X or Y axis.
+        Set the simulated rotation range of the device axis mapped to the analog
+        stick X or Y axis.
+
+        Positive X on the analog stick is mapped to tilting the device rightward
+        and positive Y is mapped to tilting the device forward.
 
         By default, an analog stick's axis is mapped to a rotation range of 60°
         (30° in either direction). If you wanted a range of 90° on the X axis,
         you could use --x-tilt-range=90.
 
-        Note that the device's X axis is mapped to the analog stick's Y axis
-        and vice-versa, because tilting the device to the left means rotating
-        it on its Y axis, and so on.
+        For historical reasons, the device's X axis is mapped to the analog
+        stick's Y axis and vice versa, as if the device is held in landscape.
 
         This is a floating-point (decimal) number of degrees, without a degree
         symbol. It may be negative.
 
     --x-tilt-offset=...
     --y-tilt-offset=...
-        Offset the simulated angle of the device on its X or Y axis.
+        Offset the simulated angle of the device axis mapped to the analog stick
+        X or Y axis.
+
+        Positive X on the analog stick is mapped to tilting the device rightward
+        and positive Y is mapped to tilting the device forward.
 
         By default, the device is simulated as being level with the ground when
         the stick is in the center/neutral position. This option is intended for
@@ -65,10 +72,6 @@ Game controller options:
         position. For example, if a game expects you to hold the device in a
         landscape orientation, with a 45° angle to the ground, you might use
         --y-tilt-offset=45.
-
-        Note that the device's X axis is mapped to the analog stick's Y axis
-        and vice-versa, because tilting the device to the left means rotating
-        it on its Y axis, and so on.
 
         This is a floating-point (decimal) number of degrees, without a degree
         symbol. It may be negative.
@@ -78,18 +81,41 @@ Game controller options:
         screen of the device. Pressing the button will behave like touching that
         part of the screen.
 
-        This is three parts separated by commas: the name of a button (Xbox-like
-        A, B, X or Y), the X co-ordinate and the Y co-ordinate. The co-ordinates
-        are floating-point (decimal) numbers. 0,0 is the top-left corner. The
-        bottom-right corner is 320,480 if the app is in portrait, and 480,320 if
-        the app is in landscape.
+        This is three parts separated by commas: the name of a button (DPadLeft,
+        DPadUp, DPadRight, DPadDown, or Xbox-like A, B, X or Y), the X
+        co-ordinate and the Y co-ordinate. The co-ordinates are floating-point
+        (decimal) numbers. 0,0 is the top-left corner. The bottom-right corner
+        is 320,480 if the app is in portrait, and 480,320 if the app is in
+        landscape.
 
         For example, --button-to-touch=A,470,310 will make the A button simulate
         tapping in the bottom-right corner of the screen, for a landscape game.
 
-        This is not used by default. There is however a virtual cursor that is
-        controlled by the right analog stick (tap/hold by pressing the stick or
-        right shoulder button).
+        Except where specified in touchHLE_default_options.txt, this is not used
+        by default. There is however a virtual cursor that is controlled by the
+        right analog stick (tap/hold by pressing the stick or right shoulder
+        button).
+
+    --stabilize-virtual-cursor=...
+        Apply motion smoothing and a sticky radius to the virtual cursor
+        (controlled by the right analog stick).
+
+        Some apps are very sensitive to small finger movements and will always
+        register an attempted "tap" as a scrolling gesture if the finger moves
+        even very slightly. When combined with the low precision and shakiness
+        of the virtual cursor, it can be difficult to use certain apps' menus.
+        This option exists to compensate for this.
+
+        The value is two floating-point (decimal) numbers separated by a comma.
+        The first is the strength of the motion smoothing, and the second is a
+        radius, in pixels, within which movement of the cursor will be ignored.
+        To increase these values is to trade off responsiveness and precision
+        respectively. Either number can be zero if desired. Note that the effect
+        of the sticky radius is *not* shown on-screen!
+
+        For example, --stabilize-virtual-cursor=0.1,10 will smooth out movements
+        such that sharp movements take about half a second to complete, while
+        movements within a 10px radius will be completely ignored.
 
 Graphics driver options:
     --gles1=...
@@ -118,3 +144,39 @@ Debugging options:
         The host and port should be separated by a colon. The host can be a
         host name or an IP address. IPv6 addresses should be enclosed in square
         brackets, e.g. --gdb=[::1]:9001 for IPv6 loopback device port 9001.
+
+Other options:
+    --preferred-languages=...
+        Specifies a list of preferred languages to be reported to the app.
+
+        This should be one or more ISO 639 language codes (usually two letters)
+        in order of preference, separated by commas. For example,
+        --preferred-languages=de,ja,en means you would prefer German, or failing
+        that Japanese, or failing that English.
+
+        If this option is not specified, the list comes from your operating
+        system's language settings.
+
+        Whether and how this preference is respected, and whether any particular
+        language is supported, is determined entirely by the app.
+
+    --headless
+        Run in headless mode. touchHLE will not create a window, so there will
+        be no graphical output and no input. Only useful for command-line apps.
+
+    --print-fps
+        Logs the current framerate (FPS) to the console once per second.
+
+    --fps-limit=...
+        Modify or disable the framerate (FPS) limit.
+
+        By default, touchHLE limits the framerate of an app to 60fps, because
+        this is required for accurate emulation. Some apps can however run
+        correctly at a higher framerate than normal.
+
+        This is either 'off', to disable the framerate limit, or otherwise
+        a floating-point (decimal) number of frames per second.
+
+        Note that many apps have an internal timer that determines how often
+        they present frames; increasing the limit will not increase their
+        framerate, but may make it less consistent.

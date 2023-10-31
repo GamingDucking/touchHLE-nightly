@@ -80,12 +80,16 @@ impl<T, const MUT: bool> Ptr<T, MUT> {
     pub fn to_bits(self) -> VAddr {
         self.0
     }
-    pub fn from_bits(bits: VAddr) -> Self {
+    pub const fn from_bits(bits: VAddr) -> Self {
         Ptr(bits, std::marker::PhantomData)
     }
 
     pub fn cast<U>(self) -> Ptr<U, MUT> {
         Ptr::<U, MUT>::from_bits(self.to_bits())
+    }
+
+    pub fn cast_void(self) -> Ptr<std::ffi::c_void, MUT> {
+        self.cast()
     }
 
     pub fn is_null(self) -> bool {
@@ -123,6 +127,7 @@ impl<T, const MUT: bool> std::ops::Add<GuestUSize> for Ptr<T, MUT> {
 
     fn add(self, other: GuestUSize) -> Self {
         let size: GuestUSize = guest_size_of::<T>();
+        assert_ne!(size, 0);
         Self::from_bits(
             self.to_bits()
                 .checked_add(other.checked_mul(size).unwrap())
@@ -140,6 +145,7 @@ impl<T, const MUT: bool> std::ops::Sub<GuestUSize> for Ptr<T, MUT> {
 
     fn sub(self, other: GuestUSize) -> Self {
         let size: GuestUSize = guest_size_of::<T>();
+        assert_ne!(size, 0);
         Self::from_bits(
             self.to_bits()
                 .checked_sub(other.checked_mul(size).unwrap())
@@ -162,6 +168,8 @@ impl<T, const MUT: bool> std::ops::SubAssign<GuestUSize> for Ptr<T, MUT> {
 /// which is notoriously unsafe in Rust. Only types for which all possible bit
 /// patterns are legal (e.g. integers) should have this trait.
 pub unsafe trait SafeRead: Sized {}
+// bool is one byte in size and has 0 as false, 1 as true in both Rust and ObjC
+unsafe impl SafeRead for bool {}
 unsafe impl SafeRead for i8 {}
 unsafe impl SafeRead for u8 {}
 unsafe impl SafeRead for i16 {}
@@ -253,6 +261,7 @@ impl Mem {
     /// iPhone OS secondary thread stack size.
     pub const SECONDARY_THREAD_STACK_SIZE: GuestUSize = 512 * 1024;
 
+    /// Create a fresh instance of guest memory.
     pub fn new() -> Mem {
         // This will hopefully get the host OS to lazily allocate the memory.
         let layout = std::alloc::Layout::new::<Bytes>();
@@ -261,6 +270,23 @@ impl Mem {
         let allocator = allocator::Allocator::new();
 
         Mem { bytes, allocator }
+    }
+
+    /// Take an existing instance of [Mem], but free and zero all the
+    /// allocations so it's "like new".
+    ///
+    /// Note that, since there is no protection against writing outside an
+    /// allocation, there might be stray bytes preserved in the result.
+    pub fn refurbish(mut mem: Mem) -> Mem {
+        let Mem {
+            bytes: _,
+            ref mut allocator,
+        } = mem;
+        let used_chunks = allocator.reset_and_drain_used_chunks();
+        for allocator::Chunk { base, size } in used_chunks {
+            mem.bytes_mut()[base as usize..][..size.get() as usize].fill(0);
+        }
+        mem
     }
 
     /// Get a pointer to the full 4GiB of memory. This is only for use when

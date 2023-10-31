@@ -109,7 +109,11 @@ impl FsNode {
         }
     }
     fn with_child(mut self, name: &str, child: FsNode) -> Self {
-        let FsNode::Directory { ref mut children, writeable: _ } = self else {
+        let FsNode::Directory {
+            ref mut children,
+            writeable: _,
+        } = self
+        else {
             panic!();
         };
         assert!(children.insert(String::from(name), child).is_none());
@@ -129,11 +133,20 @@ impl FsNode {
     }
 }
 
+// Put well-known paths in the guest filesystem here.
+
+/// Path of the applications directory in the guest filesystem.
+pub const APPLICATIONS: &GuestPath = GuestPath::new_const("/var/mobile/Applications");
+
 /// Like [Path] but for the virtual filesystem.
 #[repr(transparent)]
 #[derive(Debug)]
 pub struct GuestPath(str);
 impl GuestPath {
+    const fn new_const(s: &str) -> &GuestPath {
+        unsafe { &*(s as *const str as *const GuestPath) }
+    }
+
     pub fn new<S: AsRef<str> + ?Sized>(s: &S) -> &GuestPath {
         unsafe { &*(s.as_ref() as *const str as *const GuestPath) }
     }
@@ -407,7 +420,7 @@ impl Seek for GuestFile {
 #[derive(Debug)]
 pub struct Fs {
     root: FsNode,
-    current_directory: GuestPathBuf,
+    working_directory: GuestPathBuf,
     home_directory: GuestPathBuf,
 }
 impl Fs {
@@ -425,28 +438,39 @@ impl Fs {
     /// the app. This will be used to construct the host path for the app's
     /// sandbox directory, where documents can be stored. A directory will be
     /// created at that path if it does not already exist.
+    ///
+    /// `read_only_mode` can be used when the app won't actually be run, just
+    /// just inspected (e.g. to retrieve display name and icon), so no user data
+    /// directories are required and no sandbox directory will be created on the
+    /// host.
     pub fn new(
         app_bundle: BundleData,
         bundle_dir_name: String,
         bundle_id: &str,
+        read_only_mode: bool,
     ) -> (Fs, GuestPathBuf) {
         const FAKE_UUID: &str = "00000000-0000-0000-0000-000000000000";
 
-        let home_directory = GuestPathBuf::from(format!("/User/Applications/{}", FAKE_UUID));
-        let current_directory = home_directory.clone();
+        let home_directory = APPLICATIONS.join(FAKE_UUID);
+        let working_directory = GuestPathBuf::from("/".to_string());
 
         let bundle_guest_path = home_directory.join(&bundle_dir_name);
 
-        let documents_host_path = paths::user_data_base_path()
-            .join(paths::SANDBOX_DIR)
-            .join(bundle_id)
-            .join("Documents");
-        if let Err(e) = std::fs::create_dir_all(&documents_host_path) {
-            panic!(
-                "Could not create documents directory for app at {:?}: {:?}",
-                documents_host_path, e
-            );
-        }
+        let documents_host_path = if !read_only_mode {
+            let path = paths::user_data_base_path()
+                .join(paths::SANDBOX_DIR)
+                .join(bundle_id)
+                .join("Documents");
+            if let Err(e) = std::fs::create_dir_all(&path) {
+                panic!(
+                    "Could not create documents directory for app at {:?}: {:?}",
+                    path, e
+                );
+            }
+            Some(path)
+        } else {
+            None
+        };
 
         // Some Free Software libraries are bundled with touchHLE.
         use paths::DYLIBS_DIR;
@@ -465,26 +489,29 @@ impl Fs {
                 FsNode::resource_file(format!("{}/libstdc++.6.0.4.dylib", DYLIBS_DIR)),
             );
 
+        let mut app_dir_children = HashMap::new();
+        app_dir_children.insert(bundle_dir_name, app_bundle.into_fs_node());
+        if let Some(documents_host_path) = documents_host_path {
+            app_dir_children.insert(
+                "Documents".to_string(),
+                FsNode::from_host_dir(&documents_host_path, /* writeable: */ true),
+            );
+        }
+
         let root = FsNode::dir()
             .with_child(
-                "User",
+                "var",
                 FsNode::dir().with_child(
-                    "Applications",
+                    "mobile",
                     FsNode::dir().with_child(
-                        FAKE_UUID,
-                        FsNode::Directory {
-                            children: HashMap::from([
-                                (bundle_dir_name, app_bundle.into_fs_node()),
-                                (
-                                    "Documents".to_string(),
-                                    FsNode::from_host_dir(
-                                        &documents_host_path,
-                                        /* writeable: */ true,
-                                    ),
-                                ),
-                            ]),
-                            writeable: None,
-                        },
+                        "Applications",
+                        FsNode::dir().with_child(
+                            FAKE_UUID,
+                            FsNode::Directory {
+                                children: app_dir_children,
+                                writeable: None,
+                            },
+                        ),
                     ),
                 ),
             )
@@ -492,14 +519,22 @@ impl Fs {
 
         log_dbg!("Initial filesystem layout: {:#?}", root);
 
-        (
-            Fs {
-                root,
-                current_directory,
-                home_directory,
-            },
-            bundle_guest_path,
-        )
+        let fs = Fs {
+            root,
+            working_directory,
+            home_directory,
+        };
+        assert!(fs.lookup_node(&bundle_guest_path).is_some());
+        (fs, bundle_guest_path)
+    }
+
+    /// Create a fake filesystem (see [crate::Environment::new_without_app]).
+    pub fn new_fake_fs() -> Fs {
+        Fs {
+            root: FsNode::dir(),
+            working_directory: GuestPathBuf::from(String::new()),
+            home_directory: GuestPathBuf::from(String::new()),
+        }
     }
 
     /// Get the absolute path of the guest app's (sandboxed) home directory.
@@ -507,16 +542,54 @@ impl Fs {
         &self.home_directory
     }
 
-    /// Get the node at a given path, if it exists.
-    fn lookup_node(&self, path: &GuestPath) -> Option<&FsNode> {
+    /// Get the absolute path of the current working directory. The resulting
+    /// path may be invalid if the directory was moved or deleted.
+    pub fn working_directory(&self) -> &GuestPath {
+        &self.working_directory
+    }
+
+    /// Attempts to change the working directory.
+    pub fn change_working_directory(&mut self, new_path: &GuestPath) -> Result<&GuestPath, ()> {
+        let resolved = resolve_path(new_path, Some(&self.working_directory));
+        if !matches!(
+            self.lookup_node_inner(&resolved),
+            Some(FsNode::Directory { .. })
+        ) {
+            return Err(());
+        }
+        let new_path = if resolved.is_empty() {
+            String::from("/")
+        } else {
+            let mut new_path = String::with_capacity(resolved.iter().map(|c| c.len() + 1).sum());
+            for component in resolved {
+                new_path.push('/');
+                new_path.push_str(component);
+            }
+            new_path
+        };
+        self.working_directory = GuestPathBuf::from(new_path);
+        Ok(&self.working_directory)
+    }
+
+    /// [Self::lookup_node] with a pre-resolved path.
+    fn lookup_node_inner(&self, resolved_path_components: &[&str]) -> Option<&FsNode> {
         let mut node = &self.root;
-        for component in resolve_path(path, Some(&self.current_directory)) {
-            let FsNode::Directory { children, writeable: _ } = node else {
+        for component in resolved_path_components {
+            let FsNode::Directory {
+                children,
+                writeable: _,
+            } = node
+            else {
                 return None;
             };
-            node = children.get(component)?
+            node = children.get(*component)?
         }
         Some(node)
+    }
+
+    /// Get the node at a given path, if it exists.
+    fn lookup_node(&self, path: &GuestPath) -> Option<&FsNode> {
+        self.lookup_node_inner(&resolve_path(path, Some(&self.working_directory)))
     }
 
     /// Get the parent of the node at a given path, if it exists, and return it
@@ -524,12 +597,16 @@ impl Fs {
     /// [Self::lookup_node] useful when writing to a file, where it might not
     /// exist yet (but its parent directory does).
     fn lookup_parent_node(&mut self, path: &GuestPath) -> Option<(&mut FsNode, String)> {
-        let components = resolve_path(path, Some(&self.current_directory));
+        let components = resolve_path(path, Some(&self.working_directory));
         let (&final_component, parent_components) = components.split_last()?;
 
         let mut parent = &mut self.root;
         for &component in parent_components {
-            let FsNode::Directory { children, writeable: _ } = parent else {
+            let FsNode::Directory {
+                children,
+                writeable: _,
+            } = parent
+            else {
                 return None;
             };
             parent = children.get_mut(component)?
@@ -543,12 +620,34 @@ impl Fs {
         self.lookup_node(path).is_some()
     }
 
+    /// Returns access information about the file/directory at the path
+    /// (exists, read, write, execute)
+    pub fn access(&self, path: &GuestPath) -> (bool, bool, bool, bool) {
+        match self.lookup_node(path) {
+            None => (false, false, false, false),
+            Some(node) => match node {
+                FsNode::File {
+                    location: _,
+                    writeable,
+                } => (true, true, *writeable, false),
+                FsNode::Directory {
+                    children: _,
+                    writeable,
+                } => (true, true, writeable.is_some(), true),
+            },
+        }
+    }
+
     /// Like [Path::is_file] but for the guest filesystem.
     pub fn is_file(&self, path: &GuestPath) -> bool {
         matches!(self.lookup_node(path), Some(FsNode::File { .. }))
     }
 
-    #[allow(dead_code)]
+    /// Like [Path::is_dir] but for the guest dirsystem.
+    pub fn is_dir(&self, path: &GuestPath) -> bool {
+        matches!(self.lookup_node(path), Some(FsNode::Directory { .. }))
+    }
+
     /// Get an iterator over the names of files/directories in a directory.
     pub fn enumerate<P: AsRef<GuestPath>>(
         &self,
@@ -655,7 +754,8 @@ impl Fs {
         let FsNode::Directory {
             children,
             writeable: dir_host_path,
-        } = parent_node else {
+        } = parent_node
+        else {
             return Err(());
         };
 
@@ -710,7 +810,10 @@ impl Fs {
         }
 
         let Some(dir_host_path) = dir_host_path else {
-            log!("Warning: attempt to create file at path {:?}, but directory is read-only", path);
+            log!(
+                "Warning: attempt to create file at path {:?}, but directory is read-only",
+                path
+            );
             return Err(());
         };
 
@@ -758,7 +861,8 @@ impl Fs {
         let FsNode::Directory {
             children,
             writeable: dir_writeable,
-        } = parent_node else {
+        } = parent_node
+        else {
             return Err(());
         };
 
@@ -833,7 +937,8 @@ impl Fs {
         let FsNode::Directory {
             children,
             writeable: dir_host_path,
-        } = parent_node else {
+        } = parent_node
+        else {
             return Err(());
         };
 

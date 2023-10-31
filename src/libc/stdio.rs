@@ -5,11 +5,14 @@
  */
 //! `stdio.h`
 
-use super::posix_io::{self, O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
-use crate::dyld::{export_c_func, FunctionExports};
+use super::posix_io::{
+    self, off_t, O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, STDERR_FILENO,
+    STDIN_FILENO, STDOUT_FILENO,
+};
+use crate::dyld::{export_c_func, ConstantExports, FunctionExports, HostConstant};
 use crate::fs::GuestPath;
 use crate::libc::string::strlen;
-use crate::mem::{ConstPtr, ConstVoidPtr, GuestUSize, MutPtr, MutVoidPtr, Ptr, SafeRead};
+use crate::mem::{ConstPtr, ConstVoidPtr, GuestUSize, Mem, MutPtr, MutVoidPtr, Ptr, SafeRead};
 use crate::Environment;
 use std::io::Write;
 
@@ -26,6 +29,9 @@ struct FILE {
     fd: posix_io::FileDescriptor,
 }
 unsafe impl SafeRead for FILE {}
+
+#[allow(non_camel_case_types)]
+type fpos_t = off_t;
 
 fn fopen(env: &mut Environment, filename: ConstPtr<u8>, mode: ConstPtr<u8>) -> MutPtr<FILE> {
     // all valid modes are UTF-8
@@ -88,6 +94,30 @@ fn fgetc(env: &mut Environment, file_ptr: MutPtr<FILE>) -> i32 {
     }
 }
 
+fn fgets(
+    env: &mut Environment,
+    str: MutPtr<u8>,
+    size: GuestUSize,
+    stream: MutPtr<FILE>,
+) -> MutPtr<u8> {
+    let mut read = 0;
+    let mut tmp = str;
+    while read < size && fread(env, tmp.cast(), 1, 1, stream) != 0 {
+        tmp += 1;
+        read += 1;
+        if env.mem.read(tmp - 1) == b'\n' {
+            break;
+        }
+    }
+
+    if read == 0 {
+        return Ptr::null();
+    } else {
+        env.mem.write(tmp, b'\0');
+    }
+    str
+}
+
 fn fputs(env: &mut Environment, str: ConstPtr<u8>, stream: MutPtr<FILE>) -> i32 {
     // TODO: this function doesn't set errno or return EOF yet
     let str_len = strlen(env, str);
@@ -105,14 +135,34 @@ fn fwrite(
 ) -> GuestUSize {
     let FILE { fd } = env.mem.read(file_ptr);
 
-    // The comment about the item_size/n_items split in fread() applies here too
     let total_size = item_size.checked_mul(n_items).unwrap();
-    match posix_io::write(env, fd, buffer, total_size) {
-        // TODO: ferror() support.
-        -1 => 0,
-        bytes_written => {
-            let bytes_written: GuestUSize = bytes_written.try_into().unwrap();
-            bytes_written / item_size
+
+    // TODO: Refactor, use traits instead of this hack
+    match fd {
+        STDOUT_FILENO => {
+            let buffer_slice = env.mem.bytes_at(buffer.cast(), total_size);
+            match std::io::stdout().write(buffer_slice) {
+                Ok(bytes_written) => (bytes_written / (item_size as usize)) as GuestUSize,
+                Err(_err) => 0,
+            }
+        }
+        STDERR_FILENO => {
+            let buffer_slice = env.mem.bytes_at(buffer.cast(), total_size);
+            match std::io::stderr().write(buffer_slice) {
+                Ok(bytes_written) => (bytes_written / (item_size as usize)) as GuestUSize,
+                Err(_err) => 0,
+            }
+        }
+        _ => {
+            // The comment about the item_size/n_items split in fread() applies here too
+            match posix_io::write(env, fd, buffer, total_size) {
+                // TODO: ferror() support.
+                -1 => 0,
+                bytes_written => {
+                    let bytes_written: GuestUSize = bytes_written.try_into().unwrap();
+                    bytes_written / item_size
+                }
+            }
         }
     }
 }
@@ -152,6 +202,33 @@ fn fclose(env: &mut Environment, file_ptr: MutPtr<FILE>) -> i32 {
     }
 }
 
+fn fsetpos(env: &mut Environment, file_ptr: MutPtr<FILE>, pos: ConstPtr<fpos_t>) -> i32 {
+    let FILE { fd } = env.mem.read(file_ptr);
+
+    let res = posix_io::lseek(env, fd, env.mem.read(pos), SEEK_SET);
+    if res == -1 {
+        -1
+    } else {
+        0
+    }
+}
+
+fn fgetpos(env: &mut Environment, file_ptr: MutPtr<FILE>, pos: MutPtr<fpos_t>) -> i32 {
+    let FILE { fd } = env.mem.read(file_ptr);
+
+    let res = posix_io::lseek(env, fd, 0, posix_io::SEEK_CUR);
+    if res == -1 {
+        return -1;
+    }
+    env.mem.write(pos, res);
+    0
+}
+
+fn feof(env: &mut Environment, file_ptr: MutPtr<FILE>) -> i32 {
+    let FILE { fd } = env.mem.read(file_ptr);
+    posix_io::eof(env, fd)
+}
+
 fn puts(env: &mut Environment, s: ConstPtr<u8>) -> i32 {
     let _ = std::io::stdout().write_all(env.mem.cstr_at(s));
     let _ = std::io::stdout().write_all(b"\n");
@@ -166,6 +243,12 @@ fn putchar(_env: &mut Environment, c: u8) -> i32 {
 }
 
 fn remove(env: &mut Environment, path: ConstPtr<u8>) -> i32 {
+    if Ptr::is_null(path) {
+        // TODO: set errno
+        log!("remove({:?}) => -1, attempted to remove null", path);
+        return -1;
+    }
+
     match env
         .fs
         .remove(GuestPath::new(&env.mem.cstr_at_utf8(path).unwrap()))
@@ -182,6 +265,14 @@ fn remove(env: &mut Environment, path: ConstPtr<u8>) -> i32 {
     }
 }
 
+fn setbuf(_env: &mut Environment, stream: MutPtr<FILE>, buf: ConstPtr<u8>) {
+    assert!(buf.is_null());
+    log!(
+        "Warning: ignoring a setbuf() for {:?} with NULL (unbuffered)",
+        stream
+    );
+}
+
 // POSIX-specific functions
 
 fn fileno(env: &mut Environment, file_ptr: MutPtr<FILE>) -> posix_io::FileDescriptor {
@@ -189,19 +280,48 @@ fn fileno(env: &mut Environment, file_ptr: MutPtr<FILE>) -> posix_io::FileDescri
     fd
 }
 
+pub const CONSTANTS: ConstantExports = &[
+    (
+        "___stdinp",
+        HostConstant::Custom(|mem: &mut Mem| -> ConstVoidPtr {
+            let ptr = mem.alloc_and_write(FILE { fd: STDIN_FILENO });
+            mem.alloc_and_write(ptr).cast().cast_const()
+        }),
+    ),
+    (
+        "___stdoutp",
+        HostConstant::Custom(|mem: &mut Mem| -> ConstVoidPtr {
+            let ptr = mem.alloc_and_write(FILE { fd: STDOUT_FILENO });
+            mem.alloc_and_write(ptr).cast().cast_const()
+        }),
+    ),
+    (
+        "___stderrp",
+        HostConstant::Custom(|mem: &mut Mem| -> ConstVoidPtr {
+            let ptr = mem.alloc_and_write(FILE { fd: STDERR_FILENO });
+            mem.alloc_and_write(ptr).cast().cast_const()
+        }),
+    ),
+];
+
 pub const FUNCTIONS: FunctionExports = &[
     // Standard C functions
     export_c_func!(fopen(_, _)),
     export_c_func!(fread(_, _, _, _)),
     export_c_func!(fgetc(_)),
+    export_c_func!(fgets(_, _, _)),
     export_c_func!(fputs(_, _)),
     export_c_func!(fwrite(_, _, _, _)),
     export_c_func!(fseek(_, _, _)),
     export_c_func!(ftell(_)),
+    export_c_func!(fsetpos(_, _)),
+    export_c_func!(fgetpos(_, _)),
+    export_c_func!(feof(_)),
     export_c_func!(fclose(_)),
     export_c_func!(puts(_)),
     export_c_func!(putchar(_)),
     export_c_func!(remove(_)),
+    export_c_func!(setbuf(_, _)),
     // POSIX-specific functions
     export_c_func!(fileno(_)),
 ];

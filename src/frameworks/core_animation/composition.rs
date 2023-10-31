@@ -11,12 +11,15 @@
 
 use super::ca_eagl_layer::find_fullscreen_eagl_layer;
 use super::ca_layer::CALayerHostObject;
-use crate::frameworks::core_graphics::{cg_image, CGFloat, CGPoint, CGRect, CGSize};
+use crate::frameworks::core_graphics::{
+    cg_bitmap_context, cg_image, CGFloat, CGPoint, CGRect, CGSize,
+};
 use crate::frameworks::uikit::ui_color;
 use crate::gles::gles11_raw as gles11; // constants only
 use crate::gles::gles11_raw::types::*;
-use crate::gles::present::present_frame;
+use crate::gles::present::{present_frame, FpsCounter};
 use crate::gles::GLES;
+use crate::mem::Mem;
 use crate::objc::{id, msg, msg_class, nil, ObjC};
 use crate::Environment;
 use std::time::{Duration, Instant};
@@ -25,6 +28,7 @@ use std::time::{Duration, Instant};
 pub(super) struct State {
     texture_framebuffer: Option<(GLuint, GLuint)>,
     recomposite_next: Option<Instant>,
+    fps_counter: Option<FpsCounter>,
 }
 
 /// For use by `NSRunLoop`: call this 60 times per second. Composites the app's
@@ -37,7 +41,14 @@ pub fn recomposite_if_necessary(env: &mut Environment) -> Option<Instant> {
     // TODO: this is not correct once we support zPosition.
     // TODO: can there be windows smaller than the screen? If so we need to draw
     //       all of them.
-    let Some(&top_window) = env.framework_state.uikit.ui_window.visible_windows.last() else {
+    let Some(&top_window) = env
+        .framework_state
+        .uikit
+        .ui_view
+        .ui_window
+        .visible_windows
+        .last()
+    else {
         log_dbg!("No visible window, skipping composition");
         return None;
     };
@@ -46,6 +57,15 @@ pub fn recomposite_if_necessary(env: &mut Environment) -> Option<Instant> {
         // No composition done, EAGLContext will present directly.
         log_dbg!("Using CAEAGLLayer fast path, skipping composition");
         return None;
+    }
+
+    if env.options.print_fps {
+        env.framework_state
+            .core_animation
+            .composition
+            .fps_counter
+            .get_or_insert_with(FpsCounter::start)
+            .count_frame(format_args!("Core Animation compositor"));
     }
 
     let now = Instant::now();
@@ -83,6 +103,11 @@ pub fn recomposite_if_necessary(env: &mut Environment) -> Option<Instant> {
         .composition
         .recomposite_next = new_recomposite_next;
 
+    let root_layer: id = msg![env; top_window layer];
+
+    // Ensure layer bitmaps are up to date.
+    display_layers(env, root_layer);
+
     let screen_bounds: CGRect = {
         let screen: id = msg_class![env; UIScreen mainScreen];
         msg![env; screen bounds]
@@ -91,15 +116,14 @@ pub fn recomposite_if_necessary(env: &mut Environment) -> Option<Instant> {
     let fb_width = screen_bounds.size.width as u32 * scale_hack;
     let fb_height = screen_bounds.size.height as u32 * scale_hack;
     let present_frame_args = (
-        env.window.viewport(),
-        env.window.output_rotation_matrix(),
-        env.window.virtual_cursor_visible_at(),
+        env.window().viewport(),
+        env.window().rotation_matrix(),
+        env.window().virtual_cursor_visible_at(),
     );
 
     // TODO: draw status bar if it's not hidden
 
     // Initial state for layer tree traversal (see composite_layer_recursive)
-    let layer: id = msg![env; top_window layer];
     let origin = CGPoint { x: 0.0, y: 0.0 };
     let clip_to = CGRect {
         origin,
@@ -107,8 +131,9 @@ pub fn recomposite_if_necessary(env: &mut Environment) -> Option<Instant> {
     };
     let opacity = 1.0;
 
-    env.window.make_internal_gl_ctx_current();
-    let gles = env.window.get_internal_gl_ctx();
+    let window = env.window.as_mut().unwrap();
+    window.make_internal_gl_ctx_current();
+    let gles = window.get_internal_gl_ctx();
 
     // Set up GL objects needed for render-to-texture. We could draw directly
     // to the screen instead, but this way we can reuse the code for scaling and
@@ -188,7 +213,8 @@ pub fn recomposite_if_necessary(env: &mut Environment) -> Option<Instant> {
         composite_layer_recursive(
             gles,
             &mut env.objc,
-            layer,
+            &env.mem,
+            root_layer,
             origin,
             clip_to,
             opacity,
@@ -218,15 +244,42 @@ pub fn recomposite_if_necessary(env: &mut Environment) -> Option<Instant> {
             present_frame_args.2,
         );
     }
-    env.window.swap_window();
+    env.window().swap_window();
 
     new_recomposite_next
+}
+
+/// Call `displayIfNeeded` on all relevant layers in the tree, so their bitmaps
+/// are up to date before compositing.
+fn display_layers(env: &mut Environment, root_layer: id) {
+    // Tell layers to redraw themselves if needed.
+
+    fn traverse(objc: &ObjC, layer: id, layers_needing_display: &mut Vec<id>) {
+        let host_obj = objc.borrow::<CALayerHostObject>(layer);
+        if host_obj.hidden {
+            return;
+        }
+        if host_obj.needs_display {
+            layers_needing_display.push(layer);
+        }
+        for &layer in &host_obj.sublayers {
+            traverse(objc, layer, layers_needing_display);
+        }
+    }
+
+    let mut layers_needing_display = Vec::new();
+    traverse(&env.objc, root_layer, &mut layers_needing_display);
+
+    for layer in layers_needing_display {
+        () = msg![env; layer displayIfNeeded];
+    }
 }
 
 /// Traverses the layer tree and draws each layer.
 unsafe fn composite_layer_recursive(
     gles: &mut dyn GLES,
     objc: &mut ObjC,
+    mem: &Mem,
     layer: id,
     origin: CGPoint,
     clip_to: CGRect,
@@ -260,18 +313,28 @@ unsafe fn composite_layer_recursive(
     let absolute_frame_clipped = clip_rects(clip_to, absolute_frame);
 
     // Draw background color, if any
-    if host_obj.background_color != nil {
+    let have_background = if host_obj.background_color == nil {
+        false
+    } else {
         let (r, g, b, a) = ui_color::get_rgba(objc, host_obj.background_color);
-        gles.ClearColor(r * opacity, g * opacity, b * opacity, a * opacity);
-        let (x, y, w, h) = gl_rect_from_cg_rect(absolute_frame_clipped, scale_hack, fb_height);
-        gles.Scissor(x, y, w, h);
-        gles.Clear(gles11::COLOR_BUFFER_BIT);
-    }
+        // TODO: fully support alpha transparency for backgrounds
+        if a == 0.0 {
+            false
+        } else {
+            gles.ClearColor(r * opacity, g * opacity, b * opacity, a * opacity);
+            let (x, y, w, h) = gl_rect_from_cg_rect(absolute_frame_clipped, scale_hack, fb_height);
+            gles.Scissor(x, y, w, h);
+            gles.Clear(gles11::COLOR_BUFFER_BIT);
+            true
+        }
+    };
 
     // re-borrow mutably
     let host_obj = objc.borrow_mut::<CALayerHostObject>(layer);
 
-    let need_texture = host_obj.presented_pixels.is_some() || host_obj.contents != nil;
+    let need_texture = host_obj.presented_pixels.is_some()
+        || host_obj.contents != nil
+        || host_obj.cg_context.is_some();
     let need_update = need_texture && !host_obj.gles_texture_is_up_to_date;
 
     if need_texture {
@@ -307,13 +370,22 @@ unsafe fn composite_layer_recursive(
     // re-borrow immutably
     let host_obj = objc.borrow::<CALayerHostObject>(layer);
 
-    // Update texture with CGImageRef pixels, if any
-    if need_update && host_obj.contents != nil {
-        let image = cg_image::borrow_image(objc, host_obj.contents);
+    // Update texture with CGImageRef or CGContextRef pixels, if any
+    if need_update {
+        if host_obj.contents != nil {
+            let image = cg_image::borrow_image(objc, host_obj.contents);
 
-        // No special handling for opacity is needed here: the alpha channel
-        // on an image is meaningful and won't be ignored.
-        upload_rgba8_pixels(gles, image.pixels(), image.dimensions());
+            // No special handling for opacity is needed here: the alpha channel
+            // on an image is meaningful and won't be ignored.
+            upload_rgba8_pixels(gles, image.pixels(), image.dimensions());
+        } else if let Some(cg_context) = host_obj.cg_context {
+            // Make sure this is in sync with the code in ca_layer.rs that
+            // sets up the context!
+            let (width, height, data) = cg_bitmap_context::get_data(objc, cg_context);
+            let size = width * height * 4;
+            let pixels = mem.bytes_at(data.cast(), size);
+            upload_rgba8_pixels(gles, pixels, (width, height));
+        }
     }
 
     // re-borrow mutably
@@ -326,7 +398,7 @@ unsafe fn composite_layer_recursive(
     // Draw texture, if any
     if need_texture {
         gles.Color4f(opacity, opacity, opacity, opacity);
-        if opacity == 1.0 && host_obj.opaque {
+        if opacity == 1.0 && host_obj.opaque && !have_background {
             gles.Disable(gles11::BLEND);
         } else {
             gles.Enable(gles11::BLEND);
@@ -363,11 +435,12 @@ unsafe fn composite_layer_recursive(
         composite_layer_recursive(
             gles,
             objc,
+            mem,
             child_layer,
             /* origin: */
             CGPoint {
-                x: absolute_frame.origin.x + bounds.origin.x,
-                y: absolute_frame.origin.y + bounds.origin.y,
+                x: absolute_frame.origin.x - bounds.origin.x,
+                y: absolute_frame.origin.y - bounds.origin.y,
             },
             // TODO: clipping goes here (when masksToBounds is implemented)
             clip_to,

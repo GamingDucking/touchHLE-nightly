@@ -5,7 +5,7 @@
  */
 //! `UIImage`.
 
-use crate::frameworks::core_graphics::cg_image::{self, CGImageRef, CGImageRelease};
+use crate::frameworks::core_graphics::cg_image::{self, CGImageRef, CGImageRelease, CGImageRetain};
 use crate::frameworks::core_graphics::CGSize;
 use crate::frameworks::foundation::{ns_data, ns_string, NSInteger};
 use crate::fs::GuestPath;
@@ -31,10 +31,20 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.alloc_object(this, host_object, &mut env.mem)
 }
 
++ (id)imageWithCGImage:(CGImageRef)cg_image {
+    let new: id = msg![env; this alloc];
+    let new: id = msg![env; new initWithCGImage:cg_image];
+    autorelease(env, new)
+}
+
 + (id)imageNamed:(id)name { // NSString*
     // TODO: figure out whether this is actually correct in all cases
     let bundle: id = msg_class![env; NSBundle mainBundle];
     let path: id = msg![env; bundle pathForResource:name ofType:nil];
+    if path == nil {
+        log!("Warning: [UIImage imageNamed:{:?}] => nil", ns_string::to_rust_string(env, name));
+        return nil;
+    }
     msg![env; this imageWithContentsOfFile:path]
 }
 
@@ -59,6 +69,12 @@ pub const CLASSES: ClassExports = objc_classes! {
     CGImageRelease(env, cg_image);
 
     env.objc.dealloc_object(this, &mut env.mem)
+}
+
+- (id)initWithCGImage:(CGImageRef)cg_image {
+    CGImageRetain(env, cg_image);
+    env.objc.borrow_mut::<UIImageHostObject>(this).cg_image = cg_image;
+    this
 }
 
 - (id)initWithContentsOfFile:(id)path { // NSString*

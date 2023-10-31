@@ -97,7 +97,7 @@ impl AudioFile {
                 // and floating-point 32-bit linear PCM. We should expose all of
                 // these eventually, but we should only expose formats we've
                 // tested.
-                assert!(bits_per_sample == 16);
+                assert!(matches!(bits_per_sample, 8 | 16));
                 assert!(sample_format == hound::SampleFormat::Int);
 
                 AudioDescription {
@@ -106,10 +106,10 @@ impl AudioFile {
                         is_float: false,
                         is_little_endian: true,
                     },
-                    bytes_per_packet: u32::from(channels) * 2,
+                    bytes_per_packet: u32::from(channels * bits_per_sample / 8),
                     frames_per_packet: 1,
                     channels_per_frame: channels.into(),
-                    bits_per_channel: 16,
+                    bits_per_channel: bits_per_sample as u32,
                 }
             }
             AudioFileInner::Caf(ref caf_reader) => {
@@ -234,18 +234,26 @@ impl AudioFile {
                 let sample_count = u64::try_from(buffer.len()).unwrap() / bytes_per_sample;
                 let sample_count: usize = sample_count.try_into().unwrap();
 
-                let AudioFileInner::Wave(ref mut wave_reader) = self.0 else { unreachable!() };
+                let AudioFileInner::Wave(ref mut wave_reader) = self.0 else {
+                    unreachable!()
+                };
 
                 wave_reader
                     .seek((offset / bytes_per_sample).try_into().unwrap())
                     .map_err(|_| ())?;
 
-                assert!(bytes_per_sample == 2);
                 let mut byte_offset = 0;
                 for sample in wave_reader.samples().take(sample_count) {
                     let sample: i16 = sample.map_err(|_| ())?;
-                    buffer[byte_offset..][..2].copy_from_slice(&sample.to_le_bytes());
-                    byte_offset += 2;
+                    match bytes_per_sample {
+                        // From the OpenAL docs: 8-bit PCM data is expressed as an unsigned value
+                        // over the range 0 to 255, 128 being an audio output level of zero.
+                        // Loaded wav samples must be converted to that from signed with 0 as output level 0
+                        1 => buffer[byte_offset] = (sample + 128) as u8,
+                        2 => buffer[byte_offset..][..2].copy_from_slice(&sample.to_le_bytes()),
+                        _ => todo!(),
+                    }
+                    byte_offset += bytes_per_sample as usize;
                 }
                 Ok(byte_offset)
             }
@@ -257,7 +265,9 @@ impl AudioFile {
 
                 let packet_count = u64::try_from(buffer.len()).unwrap() / u64::from(packet_size);
 
-                let AudioFileInner::Caf(ref mut caf_reader) = self.0 else { unreachable!() };
+                let AudioFileInner::Caf(ref mut caf_reader) = self.0 else {
+                    unreachable!()
+                };
 
                 caf_reader
                     .seek_to_packet(usize::try_from(offset / u64::from(packet_size)).unwrap())
@@ -267,7 +277,7 @@ impl AudioFile {
 
                 let mut i = 0;
                 let mut byte_offset = 0;
-                while i < packet_count {
+                while i < packet_count && caf_reader.next_packet_size().is_some() {
                     caf_reader
                         .read_packet_into(&mut buffer[byte_offset..][..packet_size])
                         .map_err(|_| ())?;

@@ -7,7 +7,7 @@
 
 use crate::audio; // Keep this module namespaced to avoid confusion
 use crate::dyld::{export_c_func, FunctionExports};
-use crate::frameworks::carbon_core::OSStatus;
+use crate::frameworks::carbon_core::{eofErr, OSStatus};
 use crate::frameworks::core_audio_types::{
     debug_fourcc, fourcc, kAudioFormatAppleIMA4, kAudioFormatFlagIsBigEndian,
     kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatFlagIsSignedInteger,
@@ -76,7 +76,10 @@ fn AudioFileOpenURL(
 
     let path = to_rust_path(env, in_file_ref);
     let Ok(audio_file) = audio::AudioFile::open_for_reading(path, &env.fs) else {
-        log!("Warning: AudioFileOpenURL() for path {:?} failed", in_file_ref);
+        log!(
+            "Warning: AudioFileOpenURL() for path {:?} failed",
+            in_file_ref
+        );
         return kAudioFileFileNotFoundError;
     };
 
@@ -179,7 +182,8 @@ fn AudioFileGetProperty(
                     let is_packed = (bits_per_channel * channels_per_frame * frames_per_packet)
                         == (bytes_per_packet * 8);
                     let format_flags = (u32::from(is_float) * kAudioFormatFlagIsFloat)
-                        | (u32::from(!is_float) * kAudioFormatFlagIsSignedInteger)
+                        | (u32::from((!is_float) && matches!(bits_per_channel, 16 | 24))
+                            * kAudioFormatFlagIsSignedInteger)
                         | (u32::from(is_packed) * kAudioFormatFlagIsPacked)
                         | (u32::from(!is_little_endian) * kAudioFormatFlagIsBigEndian);
                     AudioStreamBasicDescription {
@@ -251,10 +255,13 @@ fn AudioFileReadBytes(
         .audio_file
         .read_bytes(in_starting_byte.try_into().unwrap(), buffer_slice)
         .unwrap(); // TODO: handle seek error?
-    assert!((bytes_read as u64) == (bytes_to_read as u64)); // TODO: return eofErr
     env.mem.write(io_num_bytes, bytes_read.try_into().unwrap());
 
-    0 // success
+    if bytes_read < bytes_to_read as usize {
+        eofErr
+    } else {
+        0 // success
+    }
 }
 
 fn AudioFileReadPackets(

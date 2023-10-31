@@ -87,7 +87,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 // TODO: statusBarOrientation getter
 - (())setStatusBarOrientation:(UIInterfaceOrientation)orientation {
-    env.window.rotate_device(match orientation {
+    env.window_mut().rotate_device(match orientation {
         UIDeviceOrientationPortrait => DeviceOrientation::Portrait,
         UIDeviceOrientationLandscapeLeft => DeviceOrientation::LandscapeLeft,
         UIDeviceOrientationLandscapeRight => DeviceOrientation::LandscapeRight,
@@ -101,22 +101,25 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (bool)idleTimerDisabled {
-    !env.window.is_screen_saver_enabled()
+    !env.window().is_screen_saver_enabled()
 }
 - (())setIdleTimerDisabled:(bool)disabled {
-    env.window.set_screen_saver_enabled(!disabled);
+    env.window_mut().set_screen_saver_enabled(!disabled);
 }
 
 - (bool)openURL:(id)url { // NSURL
     let ns_string = msg![env; url absoluteURL];
     let url_string = ns_string::to_rust_string(env, ns_string);
-    crate::window::open_url(&url_string);
+    if let Err(e) = crate::window::open_url(&url_string) {
+        echo!("App opened URL {:?} unsuccessfully ({}), exiting.", url_string, e);
+    } else {
+        echo!("App opened URL {:?}, exiting.", url_string);
+    }
 
     // iPhone OS doesn't really do multitasking, so the app expects to close
     // when a URL is opened, e.g. Super Monkey Ball keeps opening the URL every
     // frame! Super Monkey Ball also doesn't check whether opening failed, so
     // it's probably best to always exit.
-    echo!("App opened URL {:?}, exiting.", url_string);
     exit(env);
     true
 }

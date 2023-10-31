@@ -8,6 +8,7 @@
 use super::{ns_array, ns_string, NSUInteger};
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::fs::{GuestPath, GuestPathBuf};
+use crate::mem::MutPtr;
 use crate::objc::{
     autorelease, id, msg, msg_class, nil, objc_classes, release, ClassExports, HostObject,
 };
@@ -34,7 +35,7 @@ fn NSSearchPathForDirectoriesInDomains(
         // This might not actually be correct. I haven't bothered to test it
         // because I can't think of a good reason an iPhone OS app would have to
         // request this; Wolfenstein 3D requests it but never uses it.
-        NSApplicationDirectory => GuestPath::new("/User/Applications").to_owned(),
+        NSApplicationDirectory => GuestPath::new(crate::fs::APPLICATIONS).to_owned(),
         NSDocumentDirectory => env.fs.home_directory().join("Documents"),
         _ => todo!("NSSearchPathDirectory {}", directory),
     };
@@ -76,7 +77,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     } else {
         let new: id = msg![env; this new];
         env.framework_state.foundation.ns_file_manager.default_manager = Some(new);
-        autorelease(env, new)
+        new
     }
 }
 
@@ -87,6 +88,22 @@ pub const CLASSES: ClassExports = objc_classes! {
     let res = env.fs.exists(GuestPath::new(&path));
     log_dbg!("fileExistsAtPath:{:?} => {}", path, res);
     res
+}
+
+- (bool)fileExistsAtPath:(id)path // NSString*
+             isDirectory:(MutPtr<bool>)is_dir {
+    // TODO: mutualize with fileExistsAtPath:
+    let path = ns_string::to_rust_string(env, path); // TODO: avoid copy
+    let guest_path = GuestPath::new(&path);
+    let res_exists = env.fs.exists(guest_path);
+    if !is_dir.is_null() {
+        let res_is_dir = !env.fs.is_file(guest_path);
+        env.mem.write(is_dir, res_is_dir);
+        log_dbg!("fileExistsAtPath:{:?} isDirectory:{:?} => {}", path, res_is_dir, res_exists);
+    } else {
+        log_dbg!("fileExistsAtPath:{:?} isDirectory:NULL => {}", path, res_exists);
+    }
+    res_exists
 }
 
 - (bool)createFileAtPath:(id)path // NSString*
@@ -111,6 +128,20 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 }
 
+- (bool)removeItemAtPath:(id)path // NSString*
+                   error:(MutPtr<id>)error { // NSError**
+    let path = ns_string::to_rust_string(env, path); // TODO: avoid copy
+    match env.fs.remove(GuestPath::new(&path)) {
+        Ok(()) => true,
+        Err(()) => {
+            if !error.is_null() {
+                todo!(); // TODO: create an NSError if requested
+            }
+            false
+        }
+    }
+}
+
 - (id)enumeratorAtPath:(id)path { // NSString*
     let path = ns_string::to_rust_string(env, path); // TODO: avoid copy
     let Ok(paths) = env.fs.enumerate_recursive(GuestPath::new(&path)) else {
@@ -122,6 +153,23 @@ pub const CLASSES: ClassExports = objc_classes! {
     let class = env.objc.get_known_class("NSDirectoryEnumerator", &mut env.mem);
     let enumerator = env.objc.alloc_object(class, host_object, &mut env.mem);
     autorelease(env, enumerator)
+}
+
+- (id)directoryContentsAtPath:(id)path /* NSString* */ { // NSArray*
+    let path = ns_string::to_rust_string(env, path); // TODO: avoid copy
+    let Ok(paths) = env.fs.enumerate(GuestPath::new(&path)) else {
+        return nil;
+    };
+    let paths: Vec<GuestPathBuf> = paths
+        .map(|path| GuestPathBuf::from(GuestPath::new(path)))
+        .collect();
+    log_dbg!("directoryContentsAtPath {}: {:?}", path, paths);
+    let path_strings = paths
+        .iter()
+        .map(|name| ns_string::from_rust_string(env, name.as_str().to_string()))
+        .collect();
+    let res = ns_array::from_vec(env, path_strings);
+    autorelease(env, res)
 }
 
 @end

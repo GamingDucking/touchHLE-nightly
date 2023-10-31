@@ -561,7 +561,9 @@ impl ObjC {
     /// For use by [crate::dyld]: register all the classes from the application
     /// binary.
     pub fn register_bin_classes(&mut self, bin: &MachO, mem: &mut Mem) {
-        let Some(list) = bin.get_section("__objc_classlist") else { return; };
+        let Some(list) = bin.get_section("__objc_classlist") else {
+            return;
+        };
 
         assert!(list.size % 4 == 0);
         let base: ConstPtr<Class> = Ptr::from_bits(list.addr);
@@ -601,7 +603,9 @@ impl ObjC {
     /// For use by [crate::dyld]: register all the categories from the
     /// application binary.
     pub fn register_bin_categories(&mut self, bin: &MachO, mem: &mut Mem) {
-        let Some(list) = bin.get_section("__objc_catlist") else { return; };
+        let Some(list) = bin.get_section("__objc_catlist") else {
+            return;
+        };
 
         assert!(list.size % 4 == 0);
         let base: ConstPtr<ConstPtr<category_t>> = Ptr::from_bits(list.addr);
@@ -679,6 +683,19 @@ impl ObjC {
             } else {
                 class = next;
             }
+        }
+    }
+
+    pub fn get_class_name(&self, class: Class) -> &str {
+        let host_object = self.get_host_object(class).unwrap();
+        if let Some(ClassHostObject { name, .. }) = host_object.as_any().downcast_ref() {
+            name
+        } else if let Some(UnimplementedClass { name, .. }) = host_object.as_any().downcast_ref() {
+            name
+        } else if let Some(FakeClass { name, .. }) = host_object.as_any().downcast_ref() {
+            name
+        } else {
+            panic!();
         }
     }
 }

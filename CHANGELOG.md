@@ -18,15 +18,46 @@ If an app is added to the supported list after the relevant version has already 
 Compatibility:
 
 - API support improvements:
+  - Various small contributions. (@hikari-no-yume, @ciciplusplus, @alborrajo)
+
+Quality:
+
+- Multi-touch is now supported. (@ciciplusplus)
+
+Usability:
+
+- The Android version of touchHLE now has a _documents provider_. Thanks to a mere three hundred lines of boilerplate code [originally written for the emulator Skyline](https://github.com/skyline-emu/skyline/blob/dc20a615275f66bee20a4fd851ef0231daca4f14/app/src/main/java/emu/skyline/provider/DocumentsProvider.kt) (RIP), it is now possible for you, as the owner of a device running a newer Android version, to move ~~files~~ _documents_ in and out of touchHLE's ~~directory~~ _location_ on your device with relative ease. For example, it is now possible to download an ~~.ipa file~~ _`application/octet-stream` document_ to the Downloads folder of your device, then, using an appropriate app, move this _document_ to the touchHLE _location_. Users of normal operating systems and [older versions of Android](https://developer.android.com/about/versions/11/privacy/storage#other-apps-data) continue to be able to access a superior version of the same functionality via a so-called “file manager”. (@hikari-no-yume)
+- There is now an “Open file manager” button in the app picker, to make it easier to find where touchHLE stores your apps and settings. On most operating systems this opens the relevant directory in a file manager, and on Android it opens some sort of app for managing _documents_ in the touchHLE _location_. (@hikari-no-yume)
+- The Android version of touchHLE now writes all log messages to a file called `log.txt`, in addition to outputting them to logcat. (@hikari-no-yume)
+- The new `--stabilize-virtual-cursor=` option makes the analog stick-controlled virtual cursor appear more stable to the emulated app, which is helpful in some games with overly sensitive menu scrolling. In some titles it is applied by default. (@hikari-no-yume; special thanks: @wareya)
+- Automatic language detection now works on all platforms, and supports a list of languages in order of preference, rather than just one. The `LANG` environment variable is no longer supported, and instead the new `--preferred-languages=` option can be used. Note that it is the emulated app itself that decides what to do with this list, and whether particular languages are supported. (@hikari-no-yume)
+- The app picker now has multiple pages, so it is no longer limited to 16 apps. (@hikari-no-yume)
+- The framerate is now limited to 60fps by default, which matches the original iPhone OS and fixes issues with some games where the game ran too fast or consumed excessive energy and CPU time. This limit can be adjusted or disabled with the new `--limit-fps=` option. (@hikari-no-yume; special thanks: @wareya)
+- The `--button-to-touch=` option now supports D-pad mappings in addition to the A/B/X/Y buttons. (@alborrajo)
+
+## v0.2.0 (2023-08-31)
+
+Compatibility:
+
+- API support improvements:
   - Various small contributions. (@hikari-no-yume, @KiritoDv, @ciciplusplus, @TylerJaacks, @LennyKappa)
   - PVRTC and paletted texture compression is now supported. (@hikari-no-yume)
+  - Some key pieces of UIKit and Core Animation are now implemented: layer and view hierarchy, layer and view drawing, layer compositing, touch input hit testing, `UIImageView`, `UILabel`, `UIControl`, and `UIButton`. Previously, touchHLE could only support apps that draw everything with OpenGL ES, which is only common for games. This lays the groundwork for supporting games that rely on UIKit, and possibly some non-game apps. (@hikari-no-yume)
+  - Threads can now sleep, join other threads, and block on mutexes. (@LennyKappa, @hikari-no-yume)
+
 - New supported apps:
+  - Fastlane Street Racing (@hikari-no-yume)
+  - Mystery Mania (@KiritoDv)
   - [Wolfenstein 3D](https://www.youtube.com/watch?v=omViNgUqF8c) (@ciciplusplus; version 1.0 only)
+  - Many old apps by Donut Games (@ciciplusplus)
 
 Quality and performance:
 
 - Overlapping characters in text now render correctly. (@Xertes0)
-- touchHLE now avoids polling for events more often than 120Hz. Previously, it would sometimes poll many times more often than that, which could be very bad for performance. This change improves performance in basically all apps, though the effects on the existing supported apps are fairly subtle. (@hikari-no-yume)
+- touchHLE now avoids polling for events more often than 120Hz. Previously, it would sometimes poll many times more often than that, which could be very bad for performance. This change improves performance in basically all apps, though the effects on the supported apps from previous releases are fairly subtle. (@hikari-no-yume)
+- The macOS-only memory leak of up to 0.4MB/s seems to have been fixed! (@hikari-no-yume)
+- App icons are now displayed with rounded corners, even if the PNG file contains a square image. This is more accurate to what iPhone OS does. (@hikari-no-yume)
+- The memory allocator is a lot faster now. (@hikari-no-yume)
 
 New platform support:
 
@@ -37,20 +68,22 @@ Usability:
 - touchHLE now supports real accelerometer input on devices with a built-in accelerometer, such as phones and tablets. This is only used if no game controller is connected. (@hikari-no-yume)
 - The options help text is now available as a file (`OPTIONS_HELP.txt`), so you don't have to use the command line to get a list of options. (@hikari-no-yume)
 - The new `--fullscreen` option lets you display an app in fullscreen rather than in a window. This is independent of the internal resolution/scale hack and supports both upscaling and downscaling. (@hikari-no-yume)
-- If you run touchHLE without specifying an app, it will now display a simple graphical app picker. (@hikari-no-yume)
+- touchHLE now has a built-in app picker with a pretty icon grid. Specifying an app on the command line bypasses it. (@hikari-no-yume)
+- The new `--button-to-touch=` option lets you map a button on your game controller to a point on the touch screen. touchHLE also now includes default button mappings for some games. (@hikari-no-yume)
+- The new `--print-fps` option lets you monitor the framerate from the console. (@hikari-no-yume)
 
 Other:
 
-- touchHLE now has a primitive implementation of the GDB Remote Serial Protocol. GDB can connect to touchHLE over TCP and set software breakpoints, inspect memory and registers, step or continue execution, etc. This replaces the old `--breakpoint=` option, which is now removed. (@hikari-no-yume)
+- To assist with debugging and development, touchHLE now has a primitive implementation of the GDB Remote Serial Protocol. GDB can connect to touchHLE over TCP and set software breakpoints, inspect memory and registers, step or continue execution, etc. This replaces the old `--breakpoint=` option, which is now removed. (@hikari-no-yume)
 - The version of SDL2 used by touchHLE has been updated to 2.26.4. (@hikari-no-yume)
 - Building on common Linux systems should now work without problems, and you can use dynamic linking for SDL2 and OpenAL if you prefer. Note that we are not providing release binaries. (@GeffDev)
 - Some major changes have been made to how touchHLE interacts with graphics drivers:
-  - When possible, touchHLE will now use a native OpenGL ES 1.1 driver rather than translating to OpenGL 2.1. This is configurable with the new `--gles1=` option. (@hikari-no-yume)
+  - touchHLE can now use a native OpenGL ES 1.1 driver where available, rather than translating to OpenGL 2.1. This is configurable with the new `--gles1=` option. (@hikari-no-yume)
   - The code for presenting rendered frames to the screen has been rewritten for compatibility with OpenGL ES 1.1. (@hikari-no-yume)
   - The splash screen is now drawn with OpenGL ES 1.1, either natively or via translation to OpenGL 2.1, rather than with OpenGL 3.2. (@hikari-no-yume)
 
-  Theoretically, none of these changes should affect how touchHLE behaves for ordinary users in supported apps, but graphics drivers are inscrutable beasts, so it's hard to be certain. For example, the second change unexpectedly fixed the mysterious macOS-only memory leak! macOS users should no longer see touchHLE's memory usage constantly increase by up to 0.4MB per second.
-- The new `--button-to-touch=` option lets you map a button on your game controller to a point on the touch screen. (@hikari-no-yume)
+  Theoretically, none of these changes should affect how touchHLE behaves for ordinary users in supported apps, but graphics drivers are inscrutable and frequently buggy beasts, so it's hard to be certain. As if to demonstrate this, these changes somehow fixed the mysterious macOS-only memory leak.
+- The new `--headless` option lets you run touchHLE with no graphical output and no input whatsoever. This is only useful for command-line apps. (@hikari-no-yume)
 
 ## v0.1.2 (2023-03-07)
 

@@ -51,6 +51,7 @@ pub trait GLES {
     unsafe fn GetIntegerv(&mut self, pname: GLenum, params: *mut GLint);
     unsafe fn GetPointerv(&mut self, pname: GLenum, params: *mut *const GLvoid);
     unsafe fn Hint(&mut self, target: GLenum, mode: GLenum);
+    unsafe fn Flush(&mut self);
     unsafe fn GetString(&mut self, name: GLenum) -> *const GLubyte;
 
     // Other state manipulation
@@ -92,10 +93,18 @@ pub trait GLES {
     unsafe fn GenBuffers(&mut self, n: GLsizei, buffers: *mut GLuint);
     unsafe fn DeleteBuffers(&mut self, n: GLsizei, buffers: *const GLuint);
     unsafe fn BindBuffer(&mut self, target: GLenum, buffer: GLuint);
+    unsafe fn BufferData(
+        &mut self,
+        target: GLenum,
+        size: GLsizeiptr,
+        data: *const GLvoid,
+        usage: GLenum,
+    );
 
     // Non-pointers
     unsafe fn Color4f(&mut self, red: GLfloat, green: GLfloat, blue: GLfloat, alpha: GLfloat);
     unsafe fn Color4x(&mut self, red: GLfixed, green: GLfixed, blue: GLfixed, alpha: GLfixed);
+    unsafe fn Color4ub(&mut self, red: GLubyte, green: GLubyte, blue: GLubyte, alpha: GLubyte);
 
     // Pointers
     unsafe fn ColorPointer(
@@ -170,6 +179,9 @@ pub trait GLES {
     unsafe fn TexParameteri(&mut self, target: GLenum, pname: GLenum, param: GLint);
     unsafe fn TexParameterf(&mut self, target: GLenum, pname: GLenum, param: GLfloat);
     unsafe fn TexParameterx(&mut self, target: GLenum, pname: GLenum, param: GLfixed);
+    unsafe fn TexParameteriv(&mut self, target: GLenum, pname: GLenum, params: *const GLint);
+    unsafe fn TexParameterfv(&mut self, target: GLenum, pname: GLenum, params: *const GLfloat);
+    unsafe fn TexParameterxv(&mut self, target: GLenum, pname: GLenum, params: *const GLfixed);
     unsafe fn TexImage2D(
         &mut self,
         target: GLenum,
@@ -178,6 +190,18 @@ pub trait GLES {
         width: GLsizei,
         height: GLsizei,
         border: GLint,
+        format: GLenum,
+        type_: GLenum,
+        pixels: *const GLvoid,
+    );
+    unsafe fn TexSubImage2D(
+        &mut self,
+        target: GLenum,
+        level: GLint,
+        xoffset: GLint,
+        yoffset: GLint,
+        width: GLsizei,
+        height: GLsizei,
         format: GLenum,
         type_: GLenum,
         pixels: *const GLvoid,
@@ -203,6 +227,17 @@ pub trait GLES {
         width: GLsizei,
         height: GLsizei,
         border: GLint,
+    );
+    unsafe fn CopyTexSubImage2D(
+        &mut self,
+        target: GLenum,
+        level: GLint,
+        xoffset: GLint,
+        yoffset: GLint,
+        x: GLint,
+        y: GLint,
+        width: GLsizei,
+        height: GLsizei,
     );
     unsafe fn TexEnvf(&mut self, target: GLenum, pname: GLenum, param: GLfloat);
     unsafe fn TexEnvx(&mut self, target: GLenum, pname: GLenum, param: GLfixed);

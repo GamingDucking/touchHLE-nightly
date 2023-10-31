@@ -47,7 +47,6 @@ impl ResourceFile {
         Ok(Self {
             // On Android, these resources are included as "assets" within the
             // APK. We access them via SDL2's wrapper of Android's assets API.
-            // TODO: Make the license information accessible to the user!
             #[cfg(target_os = "android")]
             file: sdl2::rwops::RWops::from_file(path, "r")?,
             // On other OSes, resources are ordinary files in the current
@@ -65,6 +64,10 @@ impl std::fmt::Debug for ResourceFile {
         write!(f, "ResourceFile")
     }
 }
+
+/// Whether various resources are in user-accessible files. If they aren't,
+/// touchHLE has to be able to display their license terms.
+pub const RESOURCES_ARE_EXTERNAL_FILES: bool = cfg!(not(target_os = "android"));
 
 /// Name of the directory where the user can put apps if they want them to
 /// appear in the app picker.
@@ -103,4 +106,81 @@ pub fn user_data_base_path() -> &'static Path {
     }
     #[cfg(not(target_os = "android"))]
     Path::new("")
+}
+
+/// Get a URI that can be used to open a file manager or similar for the path
+/// that [user_data_base_path] represents.
+pub fn url_for_opening_user_data_dir() -> Result<String, String> {
+    if std::env::consts::OS == "android" {
+        // See DocumentsProvider.kt and AndroidManifest.xml
+        Ok("content://org.touchhle.android.provider/root/root".to_string())
+    } else {
+        let path = user_data_base_path()
+            .join(".")
+            .canonicalize()
+            .map_err(|e| format!("Can't canonicalize path to user data directory: {}", e))?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| "User data directory path is not UTF-8".to_string())?;
+        // std::fs::canonicalize() on Windows uses the extended-length path
+        // syntax, but Windows Explorer doesn't understand it.
+        let path = if std::env::consts::OS == "windows" {
+            path.strip_prefix("\\\\?\\").unwrap_or(path)
+        } else {
+            path
+        };
+        Ok(format!("file://{}", path))
+    }
+}
+
+/// Only meaningful on Android: create the user data directory if it doesn't
+/// exist, and populate it with templates or README files. (On other platforms
+/// these are simply bundled with touchHLE in a ZIP file.)
+pub fn prepopulate_user_data_dir() {
+    if std::env::consts::OS != "android" {
+        return;
+    }
+
+    let apps_dir = user_data_base_path().join(APPS_DIR);
+    if !apps_dir.is_dir() {
+        match std::fs::create_dir(&apps_dir) {
+            Ok(()) => {
+                log!("Created: {}", apps_dir.display());
+            }
+            Err(e) => {
+                log!("Warning: Couldn't create {}: {}", apps_dir.display(), e);
+            }
+        }
+    }
+
+    fn create_file(path: &Path, content: &str) {
+        match std::fs::write(path, content) {
+            Ok(()) => {
+                log!("Created: {}", path.display());
+            }
+            Err(e) => {
+                log!("Warning: Couldn't create {}: {}", path.display(), e);
+            }
+        }
+    }
+
+    let apps_dir_readme = apps_dir.join("README.txt");
+    if !apps_dir_readme.is_file() {
+        let content = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/touchHLE_apps/README.txt"
+        ));
+        create_file(&apps_dir_readme, content);
+    }
+
+    let user_options = user_data_base_path().join(USER_OPTIONS_FILE);
+    if !user_options.is_file() {
+        let content = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/touchHLE_options.txt"));
+        create_file(&user_options, content);
+    }
+
+    let options_help = user_data_base_path().join("OPTIONS_HELP.txt");
+    if !options_help.is_file() {
+        create_file(&options_help, crate::options::OPTIONS_HELP);
+    }
 }

@@ -5,11 +5,19 @@
  */
 //! The `NSArray` class cluster, including `NSMutableArray`.
 
-use super::{ns_keyed_unarchiver, NSUInteger};
+use super::ns_property_list_serialization::deserialize_plist_from_file;
+use super::{ns_keyed_unarchiver, ns_string, ns_url, NSUInteger};
+use crate::fs::GuestPath;
 use crate::objc::{
-    id, msg_class, objc_classes, release, retain, ClassExports, HostObject, NSZonePtr,
+    autorelease, id, msg_class, nil, objc_classes, release, retain, ClassExports, HostObject,
+    NSZonePtr,
 };
 use crate::Environment;
+
+struct ObjectEnumeratorHostObject {
+    iterator: std::vec::IntoIter<id>,
+}
+impl HostObject for ObjectEnumeratorHostObject {}
 
 /// Belongs to _touchHLE_NSArray
 struct ArrayHostObject {
@@ -33,6 +41,38 @@ pub const CLASSES: ClassExports = objc_classes! {
     // to have the normal behaviour. Unimplemented: call superclass alloc then.
     assert!(this == env.objc.get_known_class("NSArray", &mut env.mem));
     msg_class![env; _touchHLE_NSArray allocWithZone:zone]
+}
+
+// These probably comes from some category related to plists.
++ (id)arrayWithContentsOfFile:(id)path { // NSString*
+    let path = ns_string::to_rust_string(env, path);
+    let res = deserialize_plist_from_file(
+        env,
+        GuestPath::new(&path),
+        /* array_expected: */ true,
+    );
+    autorelease(env, res)
+}
++ (id)arrayWithContentsOfURL:(id)url { // NSURL*
+    let path = ns_url::to_rust_path(env, url);
+    let res = deserialize_plist_from_file(env, &path, /* array_expected: */ true);
+    autorelease(env, res)
+}
+
+// These probably comes from some category related to plists.
+- (id)initWithContentsOfFile:(id)path { // NSString*
+    release(env, this);
+    let path = ns_string::to_rust_string(env, path);
+    deserialize_plist_from_file(
+        env,
+        GuestPath::new(&path),
+        /* array_expected: */ true,
+    )
+}
+- (id)initWithContentsOfURL:(id)url { // NSURL*
+    release(env, this);
+    let path = ns_url::to_rust_path(env, url);
+    deserialize_plist_from_file(env, &path, /* array_expected: */ true)
 }
 
 // NSCopying implementation
@@ -112,6 +152,17 @@ pub const CLASSES: ClassExports = objc_classes! {
     env.objc.dealloc_object(this, &mut env.mem)
 }
 
+- (id)objectEnumerator { // NSEnumerator*
+    let array_host_object: &mut ArrayHostObject = env.objc.borrow_mut(this);
+    let vec = array_host_object.array.to_vec();
+    let host_object = Box::new(ObjectEnumeratorHostObject {
+        iterator: vec.into_iter(),
+    });
+    let class = env.objc.get_known_class("_touchHLE_NSArray_ObjectEnumerator", &mut env.mem);
+    let enumerator = env.objc.alloc_object(class, host_object, &mut env.mem);
+    autorelease(env, enumerator)
+}
+
 // TODO: more init methods, etc
 
 - (NSUInteger)count {
@@ -120,6 +171,15 @@ pub const CLASSES: ClassExports = objc_classes! {
 - (id)objectAtIndex:(NSUInteger)index {
     // TODO: throw real exception rather than panic if out-of-bounds?
     env.objc.borrow::<ArrayHostObject>(this).array[index as usize]
+}
+
+@end
+
+@implementation _touchHLE_NSArray_ObjectEnumerator: NSEnumerator
+
+- (id)nextObject {
+    let host_obj = env.objc.borrow_mut::<ObjectEnumeratorHostObject>(this);
+    host_obj.iterator.next().map_or(nil, |o| o)
 }
 
 @end

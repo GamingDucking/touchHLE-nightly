@@ -5,7 +5,10 @@
  */
 //! The `NSDictionary` class cluster, including `NSMutableDictionary`.
 
-use super::NSUInteger;
+use super::ns_property_list_serialization::deserialize_plist_from_file;
+use super::{ns_string, ns_url, NSUInteger};
+use crate::abi::VaList;
+use crate::fs::GuestPath;
 use crate::objc::{
     autorelease, id, msg, msg_class, nil, objc_classes, release, retain, ClassExports, HostObject,
     NSZonePtr,
@@ -80,6 +83,35 @@ impl DictionaryHostObject {
     }
 }
 
+/// Helper to enable sharing `dictionaryWithObjectsAndKeys:` and
+/// `initWithObjectsAndKeys:`' implementations without vararg passthrough.
+pub fn init_with_objects_and_keys(
+    env: &mut Environment,
+    this: id,
+    first_object: id,
+    mut va_args: VaList,
+) -> id {
+    let first_key: id = va_args.next(env);
+    assert!(first_key != nil); // TODO: raise proper exception
+
+    let mut host_object = <DictionaryHostObject as Default>::default();
+    host_object.insert(env, first_key, first_object, /* copy_key: */ true);
+
+    loop {
+        let object: id = va_args.next(env);
+        if object == nil {
+            break;
+        }
+        let key: id = va_args.next(env);
+        assert!(key != nil); // TODO: raise proper exception
+        host_object.insert(env, key, object, /* copy_key: */ true);
+    }
+
+    *env.objc.borrow_mut(this) = host_object;
+
+    this
+}
+
 pub const CLASSES: ClassExports = objc_classes! {
 
 (env, this, _cmd);
@@ -106,18 +138,47 @@ pub const CLASSES: ClassExports = objc_classes! {
     autorelease(env, new_dict)
 }
 
-+ (id)dictionaryWithObjectsAndKeys:(id)first_object /*, ...*/ {
-    // This passes on the va_args by creative abuse of untyped function calls.
-    // I should be ashamed, and you should be careful.
++ (id)dictionaryWithObjectsAndKeys:(id)first_object, ...dots {
     let new_dict: id = msg![env; this alloc];
-    let new_dict: id = msg![env; new_dict initWithObjectsAndKeys:first_object];
+    let new_dict = init_with_objects_and_keys(env, new_dict, first_object, dots.start());
     autorelease(env, new_dict)
+}
+
+// These probably comes from some category related to plists.
++ (id)dictionaryWithContentsOfFile:(id)path { // NSString*
+    let path = ns_string::to_rust_string(env, path);
+    let res = deserialize_plist_from_file(
+        env,
+        GuestPath::new(&path),
+        /* array_expected: */ false,
+    );
+    autorelease(env, res)
+}
++ (id)dictionaryWithContentsOfURL:(id)url { // NSURL*
+    let path = ns_url::to_rust_path(env, url);
+    let res = deserialize_plist_from_file(env, &path, /* array_expected: */ false);
+    autorelease(env, res)
 }
 
 - (id)init {
     todo!("TODO: Implement [dictionary init] for custom subclasses")
 }
 
+// These probably comes from some category related to plists.
+- (id)initWithContentsOfFile:(id)path { // NSString*
+    release(env, this);
+    let path = ns_string::to_rust_string(env, path);
+    deserialize_plist_from_file(
+        env,
+        GuestPath::new(&path),
+        /* array_expected: */ false,
+    )
+}
+- (id)initWithContentsOfURL:(id)url { // NSURL*
+    release(env, this);
+    let path = ns_url::to_rust_path(env, url);
+    deserialize_plist_from_file(env, &path, /* array_expected: */ false)
+}
 
 // NSCopying implementation
 - (id)copyWithZone:(NSZonePtr)_zone {
@@ -145,26 +206,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (id)initWithObjectsAndKeys:(id)first_object, ...dots {
-    let mut va_args = dots.start();
-    let first_key: id = va_args.next(env);
-    assert!(first_key != nil); // TODO: raise proper exception
-
-    let mut host_object = <DictionaryHostObject as Default>::default();
-    host_object.insert(env, first_key, first_object, /* copy_key: */ true);
-
-    loop {
-        let object: id = va_args.next(env);
-        if object == nil {
-            break;
-        }
-        let key: id = va_args.next(env);
-        assert!(key != nil); // TODO: raise proper exception
-        host_object.insert(env, key, object, /* copy_key: */ true);
-    }
-
-    *env.objc.borrow_mut(this) = host_object;
-
-    this
+    init_with_objects_and_keys(env, this, first_object, dots.start())
 }
 
 - (id)init {

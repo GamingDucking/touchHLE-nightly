@@ -137,6 +137,21 @@ fn encode_a32_trap() -> u32 {
     0xe7ffdefe
 }
 
+fn write_return_to_host_routine(mem: &mut Mem, svc: u32) -> GuestFunction {
+    let routine = [
+        encode_a32_svc(svc),
+        // When a return-to-host occurs, it's the host's responsibility
+        // to reset the PC to somewhere else. So something has gone
+        // wrong if this is executed.
+        encode_a32_trap(),
+    ];
+    let ptr: MutPtr<u32> = mem.alloc(4 * 2).cast();
+    mem.write(ptr + 0, routine[0]);
+    mem.write(ptr + 1, routine[1]);
+    let ptr = GuestFunction::from_addr_with_thumb_bit(ptr.to_bits());
+    assert!(!ptr.is_thumb());
+    ptr
+}
 pub struct Dyld {
     /// List of host functions that have been "linked" and had SVCs assigned.
     ///
@@ -144,17 +159,20 @@ pub struct Dyld {
     /// removed in release builds if it's ever necessary.
     linked_host_functions: Vec<(&'static str, HostFunction)>,
     return_to_host_routine: Option<GuestFunction>,
+    thread_exit_routine: Option<GuestFunction>,
     constants_to_link_later: Vec<(MutPtr<ConstVoidPtr>, &'static HostConstant)>,
 }
 
 impl Dyld {
     /// We reserve this SVC ID for invoking the lazy linker.
-    const SVC_LAZY_LINK: u32 = 0;
+    pub const SVC_LAZY_LINK: u32 = 0;
+    /// We reserve this SVC ID for the exit routine for spawned threads.
+    pub const SVC_THREAD_EXIT: u32 = 1;
     /// We reserve this SVC ID for the special return-to-host routine.
-    pub const SVC_RETURN_TO_HOST: u32 = 1;
+    pub const SVC_RETURN_TO_HOST: u32 = 2;
     /// The range of SVC IDs `SVC_LINKED_FUNCTIONS_BASE..` is used to reference
     /// [Self::linked_host_functions] entries.
-    const SVC_LINKED_FUNCTIONS_BASE: u32 = Self::SVC_RETURN_TO_HOST + 1;
+    pub const SVC_LINKED_FUNCTIONS_BASE: u32 = Self::SVC_RETURN_TO_HOST + 1;
 
     const SYMBOL_STUB_INSTRUCTIONS: [u32; 2] = [0xe59fc000, 0xe59cf000];
     const PIC_SYMBOL_STUB_INSTRUCTIONS: [u32; 3] = [0xe59fc004, 0xe08fc00c, 0xe59cf000];
@@ -163,6 +181,7 @@ impl Dyld {
         Dyld {
             linked_host_functions: Vec::new(),
             return_to_host_routine: None,
+            thread_exit_routine: None,
             constants_to_link_later: Vec::new(),
         }
     }
@@ -171,25 +190,18 @@ impl Dyld {
         self.return_to_host_routine.unwrap()
     }
 
+    pub fn thread_exit_routine(&self) -> GuestFunction {
+        self.thread_exit_routine.unwrap()
+    }
+
     /// Do linking-related tasks that need doing right after loading the
     /// binaries.
     pub fn do_initial_linking(&mut self, bins: &[MachO], mem: &mut Mem, objc: &mut ObjC) {
         assert!(self.return_to_host_routine.is_none());
-        self.return_to_host_routine = {
-            let routine = [
-                encode_a32_svc(Self::SVC_RETURN_TO_HOST),
-                // When a return-to-host occurs, it's the host's responsibility
-                // to reset the PC to somewhere else. So something has gone
-                // wrong if this is executed.
-                encode_a32_trap(),
-            ];
-            let ptr: MutPtr<u32> = mem.alloc(4 * 2).cast();
-            mem.write(ptr + 0, routine[0]);
-            mem.write(ptr + 1, routine[1]);
-            let ptr = GuestFunction::from_addr_with_thumb_bit(ptr.to_bits());
-            assert!(!ptr.is_thumb());
-            Some(ptr)
-        };
+        assert!(self.thread_exit_routine.is_none());
+        self.return_to_host_routine =
+            Some(write_return_to_host_routine(mem, Self::SVC_RETURN_TO_HOST));
+        self.thread_exit_routine = Some(write_return_to_host_routine(mem, Self::SVC_THREAD_EXIT));
 
         // Currently assuming only the app binary contains Objective-C things.
 
@@ -207,6 +219,18 @@ impl Dyld {
         objc.register_bin_categories(&bins[0], mem);
 
         ns_string::register_constant_strings(&bins[0], mem, objc);
+    }
+
+    /// [Self::do_initial_linking] but for when this is the app picker's special
+    /// environment with no binary (see [crate::Environment::new_without_app]).
+    pub fn do_initial_linking_with_no_bins(&mut self, mem: &mut Mem, objc: &mut ObjC) {
+        assert!(self.return_to_host_routine.is_none());
+        assert!(self.thread_exit_routine.is_none());
+        self.return_to_host_routine =
+            Some(write_return_to_host_routine(mem, Self::SVC_RETURN_TO_HOST));
+        self.thread_exit_routine = Some(write_return_to_host_routine(mem, Self::SVC_THREAD_EXIT));
+
+        objc.register_host_selectors(mem);
     }
 
     /// Set up lazy-linking stubs for a loaded binary.
@@ -272,19 +296,45 @@ impl Dyld {
     fn do_non_lazy_linking(&mut self, bin: &MachO, bins: &[MachO], mem: &mut Mem, objc: &mut ObjC) {
         let mut unhandled_relocations: HashMap<&str, Vec<u32>> = HashMap::new();
         for &(ptr_ptr, ref name) in &bin.external_relocations {
-            let ptr = if let Some(name) = name.strip_prefix("_OBJC_CLASS_$_") {
+            let ptr_ptr: MutPtr<ConstVoidPtr> = Ptr::from_bits(ptr_ptr);
+            // There will be an existing value at the address, which is an
+            // offset that should be applied to the external symbol's address.
+            // It is often 0, but not always.
+            let offset: u32 = mem.read(ptr_ptr).to_bits();
+            let target: ConstVoidPtr = if let Some(name) = name.strip_prefix("_OBJC_CLASS_$_") {
                 objc.link_class(name, /* is_metaclass: */ false, mem)
+                    .cast()
+                    .cast_const()
             } else if let Some(name) = name.strip_prefix("_OBJC_METACLASS_$_") {
                 objc.link_class(name, /* is_metaclass: */ true, mem)
+                    .cast()
+                    .cast_const()
             } else if name == "___CFConstantStringClassReference" {
                 // See ns_string::register_constant_strings
-                nil
+                nil.cast().cast_const()
+            } else if name == "__objc_empty_vtable" || name == "__objc_empty_cache" {
+                // Our Objective-C runtime doesn't use these
+                Ptr::null()
+            } else if let Some(&external_addr) = bins
+                .iter()
+                .flat_map(|other_bin| other_bin.exported_symbols.get(name))
+                .next()
+            {
+                // Often used for C++ RTTI
+                Ptr::from_bits(external_addr)
             } else {
-                // TODO: look up symbol, write pointer
-                unhandled_relocations.entry(name).or_default().push(ptr_ptr);
+                unhandled_relocations
+                    .entry(name)
+                    .or_default()
+                    .push(ptr_ptr.to_bits());
                 continue;
             };
-            mem.write(Ptr::from_bits(ptr_ptr), ptr)
+            // wrapping_add() is used in case the offset is negative. I haven't
+            // seen it happen, but it would make sense if that is allowed.
+            mem.write(
+                ptr_ptr,
+                Ptr::from_bits(target.to_bits().wrapping_add(offset)),
+            )
         }
         // Collecting unhandled relocations for the same symbol onto one line
         // makes the log output much less spammy.
@@ -339,7 +389,7 @@ impl Dyld {
             );
         }
 
-        // FIXME: there's probably internal relocations to deal with too.
+        // FIXME: check for internal relocations?
     }
 
     /// Do linking that can only be done once there is a full [Environment].
@@ -379,7 +429,7 @@ impl Dyld {
     ) -> Option<HostFunction> {
         match svc {
             Self::SVC_LAZY_LINK => self.do_lazy_link(bins, mem, cpu, svc_pc),
-            Self::SVC_RETURN_TO_HOST => unreachable!(), // don't handle here
+            Self::SVC_THREAD_EXIT | Self::SVC_RETURN_TO_HOST => unreachable!(), // don't handle here
             Self::SVC_LINKED_FUNCTIONS_BASE.. => {
                 let f = self
                     .linked_host_functions

@@ -139,9 +139,12 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.0.77"
+version = "1.0.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f73505338f7d905b19d18738976aae232eb46b8efc15554ffc56deb5d9ebe4"
+checksum = "f1174fb0b6ec23863f8b971027804a42614e347eafb0a95bf0b12cdae21fc4d0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "cfg-if"
@@ -640,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "touchHLE"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "caf",
  "cargo-license",
@@ -664,14 +667,14 @@ dependencies = [
 
 [[package]]
 name = "touchHLE_dr_mp3_wrapper"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "touchHLE_dynarmic_wrapper"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "cc",
  "cmake",
@@ -679,28 +682,28 @@ dependencies = [
 
 [[package]]
 name = "touchHLE_gl_bindings"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "gl_generator",
 ]
 
 [[package]]
 name = "touchHLE_openal_soft_wrapper"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "cmake",
 ]
 
 [[package]]
 name = "touchHLE_pvrt_decompress_wrapper"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "touchHLE_stb_image_wrapper"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "cc",
 ]

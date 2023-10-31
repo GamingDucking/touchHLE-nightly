@@ -15,12 +15,16 @@ pub mod ctype;
 pub mod cxxabi;
 pub mod dlfcn;
 pub mod errno;
+pub mod ifaddrs;
 pub mod keymgr;
 pub mod mach_thread_info;
 pub mod mach_time;
 pub mod math;
+pub mod mmap;
+pub mod net;
 pub mod posix_io;
 pub mod pthread;
+pub mod semaphore;
 pub mod setjmp;
 pub mod stdio;
 pub mod stdlib;
@@ -36,6 +40,7 @@ pub struct State {
     keymgr: keymgr::State,
     posix_io: posix_io::State,
     pthread: pthread::State,
+    pub semaphore: semaphore::State,
     stdlib: stdlib::State,
     string: string::State,
     time: time::State,

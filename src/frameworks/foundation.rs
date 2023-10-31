@@ -17,6 +17,7 @@ pub mod ns_bundle;
 pub mod ns_character_set;
 pub mod ns_coder;
 pub mod ns_data;
+pub mod ns_date;
 pub mod ns_dictionary;
 pub mod ns_enumerator;
 pub mod ns_file_manager;
@@ -26,8 +27,10 @@ pub mod ns_log;
 pub mod ns_notification;
 pub mod ns_notification_center;
 pub mod ns_null;
+pub mod ns_objc_runtime;
 pub mod ns_object;
 pub mod ns_process_info;
+pub mod ns_property_list_serialization;
 pub mod ns_run_loop;
 pub mod ns_set;
 pub mod ns_string;
@@ -53,6 +56,29 @@ pub struct State {
 pub type NSInteger = i32;
 pub type NSUInteger = u32;
 
+#[derive(Debug)]
+#[repr(C, packed)]
+pub struct NSRange {
+    pub location: NSUInteger,
+    pub length: NSUInteger,
+}
+unsafe impl crate::mem::SafeRead for NSRange {}
+crate::abi::impl_GuestRet_for_large_struct!(NSRange);
+impl crate::abi::GuestArg for NSRange {
+    const REG_COUNT: usize = 2;
+
+    fn from_regs(regs: &[u32]) -> Self {
+        NSRange {
+            location: crate::abi::GuestArg::from_regs(&regs[0..1]),
+            length: crate::abi::GuestArg::from_regs(&regs[1..2]),
+        }
+    }
+    fn to_regs(self, regs: &mut [u32]) {
+        self.location.to_regs(&mut regs[0..1]);
+        self.length.to_regs(&mut regs[1..2]);
+    }
+}
+
 pub type NSComparisonResult = NSInteger;
 pub const NSOrderedAscending: NSComparisonResult = -1;
 pub const NSOrderedSame: NSComparisonResult = 0;
@@ -60,6 +86,10 @@ pub const NSOrderedDescending: NSComparisonResult = 1;
 
 /// Number of seconds.
 pub type NSTimeInterval = f64;
+
+/// UTF-16 code unit.
+#[allow(non_camel_case_types)]
+pub type unichar = u16;
 
 /// Utility to help with implementing the `hash` method, which various classes
 /// in Foundation have to do.

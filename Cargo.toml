@@ -4,7 +4,7 @@
 [workspace]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 license = "MPL-2.0"
 authors = ["hikari_no_yume <hikari@noyu.me>", "Contributors to touchHLE"]
@@ -33,7 +33,7 @@ static = ["sdl2/bundled", "sdl2/static-link", "touchHLE_openal_soft_wrapper/stat
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [workspace.dependencies]
-cc = "1.0.77"
+cc = "1.0.83"
 cmake = "0.1.49"
 gl_generator = "0.14.0"
 

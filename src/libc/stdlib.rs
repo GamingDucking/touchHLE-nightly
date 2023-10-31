@@ -17,23 +17,24 @@ pub mod qsort;
 pub struct State {
     rand: u32,
     random: u32,
+    arc4random: u32,
     env: HashMap<Vec<u8>, MutPtr<u8>>,
 }
 
+// Sizes of zero are implementation-defined. macOS will happily give you back
+// an allocation for any of these, so presumably iPhone OS does too.
+// (touchHLE's allocator will round up allocations to at least 16 bytes.)
+
 fn malloc(env: &mut Environment, size: GuestUSize) -> MutVoidPtr {
-    // size == 0 is an implementation-defined case. macOS will give you an
-    // allocation so presumably iPhone OS does too.
-    env.mem.alloc(size.max(1))
+    env.mem.alloc(size)
 }
 
 fn calloc(env: &mut Environment, count: GuestUSize, size: GuestUSize) -> MutVoidPtr {
-    assert!(size != 0 && count != 0);
     let total = size.checked_mul(count).unwrap();
     env.mem.alloc(total)
 }
 
 fn realloc(env: &mut Environment, ptr: MutVoidPtr, size: GuestUSize) -> MutVoidPtr {
-    assert_ne!(size, 0);
     if ptr.is_null() {
         return malloc(env, size);
     }
@@ -41,6 +42,10 @@ fn realloc(env: &mut Environment, ptr: MutVoidPtr, size: GuestUSize) -> MutVoidP
 }
 
 fn free(env: &mut Environment, ptr: MutVoidPtr) {
+    if ptr.is_null() {
+        // "If ptr is a NULL pointer, no operation is performed."
+        return;
+    }
     env.mem.free(ptr);
 }
 
@@ -153,14 +158,23 @@ fn random(env: &mut Environment) -> i32 {
     (env.libc_state.stdlib.random as i32) & RAND_MAX
 }
 
+fn arc4random(env: &mut Environment) -> u32 {
+    env.libc_state.stdlib.arc4random = prng(env.libc_state.stdlib.arc4random);
+    env.libc_state.stdlib.arc4random
+}
+
 fn getenv(env: &mut Environment, name: ConstPtr<u8>) -> MutPtr<u8> {
     let name_cstr = env.mem.cstr_at(name);
     // TODO: Provide all the system environment variables an app might expect to
     // find. Currently the only environment variables that can be found are
     // those put there by the app (Crash Bandicoot Nitro Kart 3D uses this).
-    // Until then, panic if an unexpected variable is looked up, just in case.
     let Some(&value) = env.libc_state.stdlib.env.get(name_cstr) else {
-        panic!("getenv() for {:?} ({:?}) unhandled", name, std::str::from_utf8(name_cstr));
+        log!(
+            "Warning: getenv() for {:?} ({:?}) unhandled",
+            name,
+            std::str::from_utf8(name_cstr)
+        );
+        return Ptr::null();
     };
     log_dbg!(
         "getenv({:?} ({:?})) => {:?} ({:?})",
@@ -245,6 +259,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(rand()),
     export_c_func!(srandom(_)),
     export_c_func!(random()),
+    export_c_func!(arc4random()),
     export_c_func!(getenv(_)),
     export_c_func!(setenv(_, _, _)),
     export_c_func!(exit(_)),

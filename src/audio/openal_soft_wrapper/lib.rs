@@ -55,8 +55,12 @@ extern "C" {
     pub fn alcCreateContext(device: *mut ALCdevice, attrlist: *const ALCint) -> *mut ALCcontext;
     pub fn alcDestroyContext(context: *mut ALCcontext);
 
+    pub fn alcProcessContext(context: *mut ALCcontext);
+    pub fn alcSuspendContext(context: *mut ALCcontext);
+
     pub fn alcMakeContextCurrent(context: *mut ALCcontext) -> ALCboolean;
     pub fn alcGetCurrentContext() -> *mut ALCcontext;
+    pub fn alcGetContextsDevice(context: *mut ALCcontext) -> *mut ALCdevice;
 
     pub fn alcGetError(device: *mut ALCdevice) -> ALCenum;
 }
@@ -108,21 +112,68 @@ extern "C" {
     pub fn alDistanceModel(value: ALenum);
 
     pub fn alListenerf(param: ALenum, value: ALfloat);
-    pub fn alListenerfv(param: ALenum, values: *const ALfloat);
     pub fn alListener3f(param: ALenum, value1: ALfloat, value2: ALfloat, value3: ALfloat);
+    pub fn alListenerfv(param: ALenum, values: *const ALfloat);
+    pub fn alListeneri(param: ALenum, value: ALint);
+    pub fn alListener3i(param: ALenum, value1: ALint, value2: ALint, value3: ALint);
+    pub fn alListeneriv(param: ALenum, values: *const ALint);
+
+    pub fn alGetListenerf(param: ALenum, value: *mut ALfloat);
+    pub fn alGetListener3f(
+        param: ALenum,
+        value1: *mut ALfloat,
+        value2: *mut ALfloat,
+        value3: *mut ALfloat,
+    );
+    pub fn alGetListenerfv(param: ALenum, values: *mut ALfloat);
+    pub fn alGetListeneri(param: ALenum, value: *mut ALint);
+    pub fn alGetListener3i(
+        param: ALenum,
+        value1: *mut ALint,
+        value2: *mut ALint,
+        value3: *mut ALint,
+    );
+    pub fn alGetListeneriv(param: ALenum, values: *mut ALint);
 
     pub fn alGenSources(n: ALsizei, sources: *mut ALuint);
     pub fn alDeleteSources(n: ALsizei, sources: *const ALuint);
 
     pub fn alSourcef(source: ALuint, param: ALenum, value: ALfloat);
-    pub fn alSourcei(source: ALuint, param: ALenum, value: ALint);
+    pub fn alSource3f(
+        source: ALuint,
+        param: ALenum,
+        value1: ALfloat,
+        value2: ALfloat,
+        value3: ALfloat,
+    );
     pub fn alSourcefv(source: ALuint, param: ALenum, values: *const ALfloat);
+    pub fn alSourcei(source: ALuint, param: ALenum, value: ALint);
+    pub fn alSource3i(source: ALuint, param: ALenum, value1: ALint, value2: ALint, value3: ALint);
+    pub fn alSourceiv(source: ALuint, param: ALenum, values: *const ALint);
+
     pub fn alGetSourcef(source: ALuint, param: ALenum, value: *mut ALfloat);
+    pub fn alGetSource3f(
+        source: ALuint,
+        param: ALenum,
+        value1: *mut ALfloat,
+        value2: *mut ALfloat,
+        value3: *mut ALfloat,
+    );
+    pub fn alGetSourcefv(source: ALuint, param: ALenum, values: *mut ALfloat);
     pub fn alGetSourcei(source: ALuint, param: ALenum, value: *mut ALint);
+    pub fn alGetSource3i(
+        source: ALuint,
+        param: ALenum,
+        value1: *mut ALint,
+        value2: *mut ALint,
+        value3: *mut ALint,
+    );
+    pub fn alGetSourceiv(source: ALuint, param: ALenum, values: *mut ALint);
 
     pub fn alSourcePlay(source: ALuint);
     pub fn alSourcePause(source: ALuint);
     pub fn alSourceStop(source: ALuint);
+    pub fn alSourceRewind(source: ALuint);
 
     pub fn alSourceQueueBuffers(source: ALuint, nb: ALsizei, buffers: *const ALuint);
     pub fn alSourceUnqueueBuffers(source: ALuint, nb: ALsizei, buffers: *mut ALuint);

@@ -89,6 +89,9 @@ impl GLES for GLES1Native {
     unsafe fn Hint(&mut self, target: GLenum, mode: GLenum) {
         gles11::Hint(target, mode)
     }
+    unsafe fn Flush(&mut self) {
+        gles11::Flush()
+    }
     unsafe fn GetString(&mut self, name: GLenum) -> *const GLubyte {
         gles11::GetString(name)
     }
@@ -189,6 +192,16 @@ impl GLES for GLES1Native {
         assert!(target == gles11::ARRAY_BUFFER || target == gles11::ELEMENT_ARRAY_BUFFER);
         gles11::BindBuffer(target, buffer)
     }
+    unsafe fn BufferData(
+        &mut self,
+        target: GLenum,
+        size: GLsizeiptr,
+        data: *const GLvoid,
+        usage: GLenum,
+    ) {
+        assert!(target == gles11::ARRAY_BUFFER || target == gles11::ELEMENT_ARRAY_BUFFER);
+        gles11::BufferData(target, size, data, usage)
+    }
 
     // Non-pointers
     unsafe fn Color4f(&mut self, red: GLfloat, green: GLfloat, blue: GLfloat, alpha: GLfloat) {
@@ -196,6 +209,9 @@ impl GLES for GLES1Native {
     }
     unsafe fn Color4x(&mut self, red: GLfixed, green: GLfixed, blue: GLfixed, alpha: GLfixed) {
         gles11::Color4x(red, green, blue, alpha)
+    }
+    unsafe fn Color4ub(&mut self, red: GLubyte, green: GLubyte, blue: GLubyte, alpha: GLubyte) {
+        gles11::Color4ub(red, green, blue, alpha)
     }
 
     // Pointers
@@ -313,6 +329,15 @@ impl GLES for GLES1Native {
     unsafe fn TexParameterx(&mut self, target: GLenum, pname: GLenum, param: GLfixed) {
         gles11::TexParameterx(target, pname, param)
     }
+    unsafe fn TexParameteriv(&mut self, target: GLenum, pname: GLenum, params: *const GLint) {
+        gles11::TexParameteriv(target, pname, params)
+    }
+    unsafe fn TexParameterfv(&mut self, target: GLenum, pname: GLenum, params: *const GLfloat) {
+        gles11::TexParameterfv(target, pname, params)
+    }
+    unsafe fn TexParameterxv(&mut self, target: GLenum, pname: GLenum, params: *const GLfixed) {
+        gles11::TexParameterxv(target, pname, params)
+    }
     unsafe fn TexImage2D(
         &mut self,
         target: GLenum,
@@ -335,6 +360,22 @@ impl GLES for GLES1Native {
             format,
             type_,
             pixels,
+        )
+    }
+    unsafe fn TexSubImage2D(
+        &mut self,
+        target: GLenum,
+        level: GLint,
+        xoffset: GLint,
+        yoffset: GLint,
+        width: GLsizei,
+        height: GLsizei,
+        format: GLenum,
+        type_: GLenum,
+        pixels: *const GLvoid,
+    ) {
+        gles11::TexSubImage2D(
+            target, level, xoffset, yoffset, width, height, format, type_, pixels,
         )
     }
     unsafe fn CompressedTexImage2D(
@@ -395,6 +436,19 @@ impl GLES for GLES1Native {
         border: GLint,
     ) {
         gles11::CopyTexImage2D(target, level, internalformat, x, y, width, height, border)
+    }
+    unsafe fn CopyTexSubImage2D(
+        &mut self,
+        target: GLenum,
+        level: GLint,
+        xoffset: GLint,
+        yoffset: GLint,
+        x: GLint,
+        y: GLint,
+        width: GLsizei,
+        height: GLsizei,
+    ) {
+        gles11::CopyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height)
     }
     unsafe fn TexEnvf(&mut self, target: GLenum, pname: GLenum, param: GLfloat) {
         gles11::TexEnvf(target, pname, param)
