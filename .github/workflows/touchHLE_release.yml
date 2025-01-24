@@ -1,11 +1,11 @@
 name: Build touchHLE
 
 on:
+  workflow_dispatch
   push:
     branches: [ "trunk" ]
   pull_request:
     branches: [ "trunk" ]
-on: workflow_dispatch
 
 env:
   CARGO_TERM_COLOR: always
